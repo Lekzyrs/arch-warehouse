@@ -57,15 +57,19 @@ curl -sf http://localhost:8082/actuator/prometheus | grep -q "# HELP" && echo " 
 
 # SC-06: INFRA-04 — no hardcoded passwords in service src (env-only config)
 echo "[SC-06] No hardcoded credentials in service src..."
-HARDCODED=$(grep -rn "password\s*=" product-service/src stock-service/src notification-service/src 2>/dev/null \
-  | grep -v "process\.env" | grep -v "//" | wc -l | tr -d ' ')
+# `|| true` guards the whole pipeline: a no-match grep exits 1, which under
+# `set -o pipefail` would otherwise abort the script on the success case.
+HARDCODED=$( { grep -rEn "password[[:space:]]*=" product-service/src stock-service/src notification-service/src 2>/dev/null \
+  | grep -v "process\.env" | grep -v "//" | wc -l | tr -d ' '; } || true )
 [ "${HARDCODED:-0}" -eq 0 ] || { echo "FAIL: ${HARDCODED} potential hardcoded credential(s)"; exit 1; }
 echo "  OK: 0 hardcoded credentials"
 
 # SC-07: INFRA-03 (partial) — product_db and stock_db created by init script
 echo "[SC-07] product_db + stock_db exist..."
 if docker compose ps --format '{{.Service}}' 2>/dev/null | grep -q "postgres"; then
-  DBS=$(docker compose exec -T postgres psql -U "${POSTGRES_USER}" -tc "\l" 2>/dev/null || true)
+  # -d postgres is required: without it psql connects to a DB named after the
+  # user (e.g. "archuser"), which does not exist → false negative.
+  DBS=$(docker compose exec -T postgres psql -U "${POSTGRES_USER}" -d postgres -tc "\l" 2>/dev/null || true)
   if echo "$DBS" | grep -q "product_db" && echo "$DBS" | grep -q "stock_db"; then
     echo "  OK: product_db and stock_db present"
   else
