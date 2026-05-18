@@ -1,7 +1,6 @@
 import { Pool } from "pg";
 
-// INFRA-04: every field comes from process.env with a safe fallback.
-// No config object, no dotenv package.
+// все поля из process.env с безопасным fallback, без config-объекта и dotenv
 export const pool = new Pool({
   host: process.env.POSTGRES_HOST ?? "localhost",
   port: Number(process.env.POSTGRES_PORT ?? 5432),
@@ -10,12 +9,10 @@ export const pool = new Pool({
   database: process.env.POSTGRES_DB ?? "product_db",
 });
 
-// D-02/D-03: the schema-bootstrap hook exists from Phase 1 so later phases
-// extend it (not invent it). Phase 1 skeleton has no tables — Phase 2 adds
-// CREATE TABLE IF NOT EXISTS products (...) here.
+// seam для bootstrap схемы. сейчас таблиц нет
 export async function initSchema(): Promise<void> {
-  // intentionally empty for Phase 1 skeleton (no pool.query yet)
+  // пусто, pool.query ещё нет
   console.log(
-    "[product-service] DB schema ready (no tables yet — Phase 2 adds products table)",
+    "[product-service] DB schema ready (no tables yet - Phase 2 adds products table)",
   );
 }

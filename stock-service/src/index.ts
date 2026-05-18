@@ -6,22 +6,16 @@ import { withRetry } from "./utils/retry";
 const PORT = Number(process.env.SERVER_PORT ?? process.env.PORT ?? 8080);
 
 async function bootstrap() {
-  // D-02/D-03: schema bootstrap behind connect retry/backoff. Phase 1
-  // initSchema() is a no-op; the seam exists for Phase 3 (ES) to extend.
+  // initSchema под connect retry/backoff. сейчас no-op, таблиц нет
   await withRetry(() => initSchema(), "stock-service");
-
-  // Phase 2+: await connectRedis();
-  // Phase 5+: await connectRabbitMQ();
 
   const app = express();
   app.use(express.json());
 
-  // Phase 3+: app.use('/stock', stockRouter);  // CQRS command/query
-
-  // D-05: shallow liveness — 200 while the process is up, no dependency pings.
+  // shallow liveness: 200 пока процесс жив, без пинга зависимостей
   app.get("/health", (_req: Request, res: Response) => res.json({ ok: true }));
 
-  // OBS-01: exact path /actuator/prometheus (NOT /metrics).
+  // путь именно /actuator/prometheus, не /metrics
   app.get("/actuator/prometheus", async (_req: Request, res: Response) => {
     res.set("Content-Type", registry.contentType);
     res.end(await registry.metrics());

@@ -1,4 +1,4 @@
-# Phase 1 stub — minimal valid Alertmanager config so the container starts
+# Phase 1 stub - minimal valid Alertmanager config so the container starts
 # cleanly (Assumption A3 / RESEARCH Open Question 3).
 # Phase 5/6: replace with Mailpit routing rules.
 route:

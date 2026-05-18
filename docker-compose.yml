@@ -1,4 +1,4 @@
-# archfinal — Phase 1 full stack (Compose v2, no top-level version: key).
+# archfinal - Phase 1 full stack (Compose v2, no top-level version: key).
 # All secrets and port assignments come from the root .env (INFRA-04).
 # App containers wait for infra via depends_on healthcheck-gated conditions.
 
@@ -40,7 +40,7 @@ services:
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS}
     volumes:
       # CR-02: enable rabbitmq_prometheus (NOT on by default in 3.13-management).
-      # An enabled_plugins file is the reliable mechanism — ERL_ARGS does not
+      # An enabled_plugins file is the reliable mechanism - ERL_ARGS does not
       # enable a plugin. Exposes /metrics on 15692 (Prometheus default path).
       - ./observability/rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
     healthcheck:

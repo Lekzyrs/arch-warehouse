@@ -1,6 +1,4 @@
-// Phase 1 placeholder broker topology — Phase 5 (EDA) finalizes these names.
-// Names align with the planned EDA topology: EDA-01 "warehouse.exchange",
-// EDA-02 "stock.low.notifications". URL is env-only (INFRA-04) with safe defaults.
+// url только из env с дефолтами
 export const RABBIT_CONFIG = {
   url:
     process.env.RABBITMQ_URL ??

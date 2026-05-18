@@ -1,8 +1,5 @@
-// Source: 01-RESEARCH.md Pattern §4 (no codebase analog — new pattern for archfinal).
-// Each service keeps its own copy (D-04: independent npm packages, no workspaces).
-// Parameters: 8 attempts, 500ms base, 2x backoff, 8s cap → ~43.5s total ceiling.
-// On final failure the error propagates → bootstrap() → process.exit(1) →
-// Docker `restart: unless-stopped` relaunches the container.
+// retry с экспоненциальным backoff, своя копия в каждом сервисе (независимые npm-пакеты)
+// 8 попыток, base 500ms, x2, cap 8s (~43.5s). на финальной ошибке throw -> process.exit(1) -> docker restart
 export async function withRetry<T>(
   fn: () => Promise<T>,
   label: string,

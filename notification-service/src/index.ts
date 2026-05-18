@@ -4,17 +4,15 @@ import { registry } from "./metrics/registry";
 const PORT = Number(process.env.SERVER_PORT ?? process.env.PORT ?? 8082);
 
 async function bootstrap() {
-  // Phase 5+: await startConsumer();  // RabbitMQ consumer connect goes here.
-  // Phase 1 has no DB and no broker — bootstrap() has no awaits.
+  // нет DB/broker, поэтому bootstrap без await
 
   const app = express();
 
-  // D-05: shallow liveness — 200 while the process is up, no dependency pings.
+  // shallow liveness: 200 пока процесс жив, без пинга зависимостей
   app.get("/health", (_req: Request, res: Response) => res.json({ ok: true }));
 
-  // OBS-01: exact path /actuator/prometheus (NOT /metrics). notification-service
-  // has no business HTTP API — this Express server exists solely so Prometheus
-  // sees 3/3 app targets, not 2/3 (PITFALLS P7).
+  // путь именно /actuator/prometheus, не /metrics. business HTTP API нет,
+  // этот Express нужен только чтобы Prometheus видел все 3 targets
   app.get("/actuator/prometheus", async (_req: Request, res: Response) => {
     res.set("Content-Type", registry.contentType);
     res.end(await registry.metrics());

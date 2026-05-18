@@ -1,7 +1,7 @@
 FROM node:20-alpine AS builder
 WORKDIR /app
 
-# shared-contracts must come first — service tsconfig.json includes it
+# shared-contracts must come first - service tsconfig.json includes it
 COPY shared-contracts /app/shared-contracts
 RUN cd /app/shared-contracts && npm install --omit=dev || true
 
