@@ -1,8 +1,10 @@
 # Phase 1 stub — minimal valid Prometheus config so the container starts
 # without a parse error (Assumption A2). Phase 6 fills in real scrape rules.
-# Targets use Docker-network DNS (container name + container port): Prometheus
-# scrapes inside the compose network. stock-service container port is 8080
-# (host 8081) — scrape the container port here.
+# Targets use Docker-network DNS (container name + the port the service
+# actually listens on inside the network). Each service binds SERVER_PORT =
+# ${<SVC>_SERVICE_PORT} from .env, so the internal port == the .env default:
+# product 8080, stock 8081, notification 8082 (CR-01: stock listens on 8081,
+# not 8080 — there is no container/host port split).
 global:
   scrape_interval: 15s
   evaluation_interval: 15s
@@ -16,7 +18,7 @@ scrape_configs:
   - job_name: "stock-service"
     metrics_path: "/actuator/prometheus"
     static_configs:
-      - targets: ["stock-service:8080"]
+      - targets: ["stock-service:8081"]
 
   - job_name: "notification-service"
     metrics_path: "/actuator/prometheus"

@@ -21,5 +21,7 @@ COPY --from=builder /app/stock-service/dist /app/stock-service/dist
 COPY --from=builder /app/stock-service/package.json /app/stock-service/package.json
 
 WORKDIR /app/stock-service
-EXPOSE 8080
+# EXPOSE is documentation-only; the service binds SERVER_PORT=${STOCK_SERVICE_PORT}
+# (8081 by default), so document 8081 to match the real listen port (CR-01).
+EXPOSE 8081
 CMD ["node", "dist/stock-service/src/index.js"]
