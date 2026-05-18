@@ -1,0 +1,13 @@
+{
+  "name": "shared-contracts",
+  "version": "1.0.0",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "build": "tsc"
+  },
+  "devDependencies": {
+    "@types/node": "22",
+    "typescript": "~5.9.3"
+  }
+}
