@@ -1,0 +1,7 @@
+*/node_modules
+*/dist
+.git
+.planning
+*.md
+.env
+.env.example
