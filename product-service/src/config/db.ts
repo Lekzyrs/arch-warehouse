@@ -9,10 +9,19 @@ export const pool = new Pool({
   database: process.env.POSTGRES_DB ?? "product_db",
 });
 
-// seam для bootstrap схемы. сейчас таблиц нет
+// seam для bootstrap схемы. CREATE TABLE IF NOT EXISTS - идемпотентно
 export async function initSchema(): Promise<void> {
-  // пусто, pool.query ещё нет
-  console.log(
-    "[product-service] DB schema ready (no tables yet - Phase 2 adds products table)",
-  );
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS products (
+      id          TEXT PRIMARY KEY,
+      sku         TEXT NOT NULL UNIQUE,
+      name        TEXT NOT NULL,
+      description TEXT,
+      unit        TEXT NOT NULL,
+      category    TEXT NOT NULL,
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  console.log("[product-service] products table ready");
 }
