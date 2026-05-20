@@ -187,7 +187,12 @@ export async function applyEventToReadModel(
   // повторные события ниже threshold НЕ публикуют повторный alert (anti-spam).
   // дополнительно: publishAlerts=false для replay - rebuildReadModels не должен
   // триггерить email storm на исторические события.
+  // availableBefore = +Infinity означает что строки в stock_balances не было до этого
+  // события: либо STOCK_IN-первое-событие, либо STOCK_OUT/ADJUSTMENT invariant violation
+  // (см. warning выше). в обоих случаях нет реального "над threshold" предыдущего состояния -
+  // не публикуем фантомный alert.
   const crossedThreshold =
+    Number.isFinite(availableBefore) &&
     availableBefore > LOW_STOCK_THRESHOLD &&
     availableAfter <= LOW_STOCK_THRESHOLD;
 
