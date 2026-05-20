@@ -1,5 +1,6 @@
 import { pool } from "../config/db";
 import type { StockEvent } from "../domain/eventSchemas";
+import { resetReadModels } from "./readModels";
 
 // synchronous projector. вызывается сразу после appendEvents в обработчиках команд.
 // available column GENERATED ALWAYS - проектор пишет on_hand, postgres вычисляет available (T-04-04).
@@ -130,7 +131,24 @@ export async function applyEventToReadModel(event: StockEvent): Promise<void> {
   );
 }
 
-// stub - полная реализация в Plan 04-03 (replay). нужен экспорт для admin router (04-03)
+// deterministic replay (CQRS-05, CQRS-06). admin-only endpoint (T-04-12).
+// ORDER BY occurred_at ASC NULLS LAST, aggregate_id ASC, version ASC - три уровня сортировки
+// гарантируют byte-identical rebuild при одинаковом events table (P3 mitigation, T-04-14).
 export async function rebuildReadModels(): Promise<void> {
-  throw new Error("rebuildReadModels not yet implemented - see Plan 04-03");
+  await resetReadModels();
+  console.log("[stock-service] starting replay from events table");
+
+  const result = await pool.query(
+    `SELECT aggregate_id, version, event_type, payload, occurred_at
+     FROM events
+     ORDER BY occurred_at ASC NULLS LAST, aggregate_id ASC, version ASC`,
+  );
+
+  for (const row of result.rows) {
+    await applyEventToReadModel(row as StockEvent);
+  }
+
+  console.log(
+    `[stock-service] replay complete: ${result.rows.length} events replayed`,
+  );
 }

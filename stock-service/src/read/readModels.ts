@@ -92,3 +92,47 @@ export async function listBalances(filters: {
   );
   return rows;
 }
+
+// movement history row. CQRS-04: read из stock_movement, не из events
+export interface StockMovementRow {
+  id: string;
+  product_id: string;
+  warehouse_id: string;
+  location_id: string;
+  aggregate_id: string;
+  event_type: string;
+  quantity_change: number;
+  on_hand_after: number;
+  occurred_at: Date;
+}
+
+// limit clamped до 500 (T-04-17 DoS mitigation). default 100
+export async function listMovements(filters: {
+  productId?: string | null;
+  warehouseId?: string | null;
+  limit?: number;
+}): Promise<StockMovementRow[]> {
+  const limit = Math.min(filters.limit ?? 100, 500);
+  const { rows } = await pool.query<StockMovementRow>(
+    `SELECT id, product_id, warehouse_id, location_id, aggregate_id,
+            event_type, quantity_change, on_hand_after, occurred_at
+     FROM stock_movement
+     WHERE ($1::text IS NULL OR product_id = $1)
+       AND ($2::text IS NULL OR warehouse_id = $2)
+     ORDER BY occurred_at DESC
+     LIMIT $3`,
+    [filters.productId ?? null, filters.warehouseId ?? null, limit],
+  );
+  return rows;
+}
+
+// destructive: wipe read tables перед replay (CQRS-06).
+// TRUNCATE - DDL, не транзакционен; admin-only operation (T-04-12 guarded)
+export async function resetReadModels(): Promise<void> {
+  await pool.query("TRUNCATE TABLE stock_balances");
+  await pool.query("TRUNCATE TABLE stock_movement");
+  await pool.query(
+    "UPDATE projection_offset SET last_event_at = NULL, last_aggregate = NULL, last_version = NULL WHERE id = 1",
+  );
+  console.log("[stock-service] read models reset - ready for replay");
+}
