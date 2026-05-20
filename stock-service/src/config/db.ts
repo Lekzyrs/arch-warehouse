@@ -9,10 +9,27 @@ export const pool = new Pool({
   database: process.env.POSTGRES_DB ?? "stock_db",
 });
 
-// seam для bootstrap схемы. сейчас таблиц нет
+// seam для bootstrap схемы. DDL идемпотентен через IF NOT EXISTS.
+// UNIQUE (aggregate_id, version) - оптимистическая блокировка (ES-05, 03-03)
 export async function initSchema(): Promise<void> {
-  // пусто, pool.query ещё нет
-  console.log(
-    "[stock-service] DB schema ready (no tables yet - Phase 3 adds events/snapshots tables)",
-  );
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS events (
+      aggregate_id TEXT NOT NULL,
+      version      INTEGER NOT NULL,
+      event_type   TEXT NOT NULL,
+      payload      JSONB NOT NULL,
+      occurred_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT events_aggregate_version_uq UNIQUE (aggregate_id, version)
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS snapshots (
+      aggregate_id TEXT NOT NULL,
+      version      INTEGER NOT NULL,
+      state        JSONB NOT NULL,
+      created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (aggregate_id, version)
+    )
+  `);
+  console.log("[stock-service] schema ready (events + snapshots)");
 }
