@@ -1,6 +1,7 @@
 import express, { Request, Response } from "express";
 import { initSchema } from "./config/db";
 import { registry } from "./metrics/registry";
+import { adminRouter } from "./routes/admin.router";
 import { commandsRouter } from "./routes/commands.router";
 import { queryRouter } from "./routes/query.router";
 import { withRetry } from "./utils/retry";
@@ -31,6 +32,10 @@ async function bootstrap() {
   // GET /stock - читает stock_balances (CQRS-02 physical separation)
   app.use("/stock", queryRouter);
   console.log("[stock-service] Query routes registered at /stock");
+
+  // POST /admin/replay - rebuild read model (CQRS-05/06, X-Admin-Key gated)
+  app.use("/admin", adminRouter);
+  console.log("[stock-service] Admin routes registered at /admin");
 
   app.listen(PORT, () =>
     console.log(`[stock-service] Listening on http://0.0.0.0:${PORT}`),
