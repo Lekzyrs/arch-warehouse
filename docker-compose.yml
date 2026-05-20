@@ -123,6 +123,7 @@ services:
       RABBITMQ_USER: ${RABBITMQ_USER}
       RABBITMQ_PASS: ${RABBITMQ_PASS}
       SERVER_PORT: ${STOCK_SERVICE_PORT}
+      SNAPSHOT_EVERY: ${SNAPSHOT_EVERY:-50}
     depends_on:
       postgres:
         condition: service_healthy

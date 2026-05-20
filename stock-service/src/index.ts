@@ -1,12 +1,13 @@
 import express, { Request, Response } from "express";
 import { initSchema } from "./config/db";
 import { registry } from "./metrics/registry";
+import { commandsRouter } from "./routes/commands.router";
 import { withRetry } from "./utils/retry";
 
 const PORT = Number(process.env.SERVER_PORT ?? process.env.PORT ?? 8080);
 
 async function bootstrap() {
-  // initSchema под connect retry/backoff. сейчас no-op, таблиц нет
+  // initSchema под connect retry/backoff. создаёт events + snapshots таблицы
   await withRetry(() => initSchema(), "stock-service");
 
   const app = express();
@@ -20,6 +21,10 @@ async function bootstrap() {
     res.set("Content-Type", registry.contentType);
     res.end(await registry.metrics());
   });
+
+  // POST /stock/stock-in -> append event в events table (ES-01)
+  app.use("/stock", commandsRouter);
+  console.log("[stock-service] Stock command routes registered");
 
   app.listen(PORT, () =>
     console.log(`[stock-service] Listening on http://0.0.0.0:${PORT}`),

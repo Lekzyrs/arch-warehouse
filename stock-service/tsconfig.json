@@ -9,5 +9,6 @@
     "rootDir": "..",
     "resolveJsonModule": true
   },
-  "include": ["src/**/*", "../shared-contracts/src/**/*"]
+  "include": ["src/**/*", "../shared-contracts/src/**/*"],
+  "exclude": ["**/*.test.ts"]
 }
