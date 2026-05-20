@@ -12,6 +12,50 @@ import { RABBIT_CONFIG } from "../../../shared-contracts/src/rabbitmq-config";
 let connection: ChannelModel | null = null;
 let channel: Channel | null = null;
 
+// reconnect backoff. exponential: 1s, 2s, 4s, 8s, 16s. после 5 попыток publisher
+// "уходит в тишину" (не fatal: projector ловит publish error в try/catch и не
+// валит проекцию - см. read/projector.ts). T-05-14 accept: stock-service сам по
+// себе работает дальше, теряем только stock.low alerts до восстановления.
+const MAX_RECONNECT_ATTEMPTS = 5;
+const INITIAL_RECONNECT_DELAY_MS = 1000;
+const RECONNECT_BACKOFF_MULTIPLIER = 2;
+let reconnectAttempt = 0;
+let intentionallyClosed = false;
+
+function schedulePublisherReconnect(): void {
+  if (intentionallyClosed) {
+    // closePublisher() выставил flag - не пытаемся подняться обратно
+    return;
+  }
+  if (reconnectAttempt >= MAX_RECONNECT_ATTEMPTS) {
+    console.error(
+      "[stock-service] FATAL: publisher max reconnect attempts reached",
+    );
+    return;
+  }
+  reconnectAttempt += 1;
+  const delay =
+    INITIAL_RECONNECT_DELAY_MS *
+    Math.pow(RECONNECT_BACKOFF_MULTIPLIER, reconnectAttempt - 1);
+  console.log(
+    "[stock-service] publisher reconnect attempt " +
+      reconnectAttempt +
+      " in " +
+      delay +
+      "ms",
+  );
+  setTimeout(async () => {
+    try {
+      await connect();
+      reconnectAttempt = 0;
+      console.log("[stock-service] publisher reconnected");
+    } catch (e) {
+      console.error("[stock-service] publisher reconnect failed:", e);
+      schedulePublisherReconnect();
+    }
+  }, delay);
+}
+
 export async function connect(): Promise<void> {
   // RABBITMQ_URL приоритетнее; иначе собираем url из RABBITMQ_HOST/PORT/USER/PASS
   // (RABBIT_CONFIG.url из shared-contracts - единая точка сборки)
@@ -25,6 +69,21 @@ export async function connect(): Promise<void> {
 
   await channel.assertExchange(WAREHOUSE_EXCHANGE, "topic", { durable: true });
 
+  // reconnect handlers. connection.on('error') ловит сетевые сбои; channel.on
+  // ('close') - закрытие канала после restart брокера. оба маршрута сходятся в
+  // schedulePublisherReconnect. listener'ы вешаются ПОСЛЕ успешного assert чтобы
+  // не дёрнуться на первом подключении.
+  connection.on("error", (err: Error) => {
+    console.error("[stock-service] RabbitMQ connection error:", err.message);
+    schedulePublisherReconnect();
+  });
+  channel.on("close", () => {
+    console.warn("[stock-service] RabbitMQ channel closed; scheduling reconnect");
+    connection = null;
+    channel = null;
+    schedulePublisherReconnect();
+  });
+
   console.log(
     `[stock-service] publisher connected to RabbitMQ exchange=${WAREHOUSE_EXCHANGE}`,
   );
@@ -32,7 +91,10 @@ export async function connect(): Promise<void> {
 
 export async function publishStockLow(event: StockLowEvent): Promise<void> {
   if (!channel) {
-    throw new Error("publisher not connected - call connect() first");
+    // во время reconnect ходим в "тишину" а не throw - projector уже оборачивает
+    // в try/catch (Plan 05-01), но дополнительная защита здесь оставляет ясный лог.
+    console.warn("[stock-service] publish skipped (reconnecting)");
+    return;
   }
 
   // deliveryMode:2 - persistent (требование EDA-01). contentType - чтобы консумер
@@ -50,6 +112,10 @@ export async function publishStockLow(event: StockLowEvent): Promise<void> {
 }
 
 export async function closePublisher(): Promise<void> {
+  // выставляем флаг ДО close чтобы channel.on('close') не запустил reconnect
+  // на intentional shutdown (SIGTERM из docker compose stop).
+  intentionallyClosed = true;
+  reconnectAttempt = MAX_RECONNECT_ATTEMPTS;
   try {
     await channel?.close();
     await connection?.close();

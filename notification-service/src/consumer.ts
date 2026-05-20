@@ -18,6 +18,22 @@ import { registry } from "./metrics/registry";
 //   - sendLowStockEmail в try/catch: email error -> non-fatal, ack всё равно
 //   - notifications_consumed_total Counter с labels success/validation_error/email_error
 //   - prefetch(1), noAck:false, manual ack/nack
+//
+// EDA-05 reconnect:
+//   - startConsumerWithRetry оборачивает startConsumer в exponential backoff loop
+//     (1s, 2s, 4s, 8s, 16s; max 5 attempts). после max - process.exit(1) и
+//     restart:unless-stopped поднимет контейнер заново (T-05-15).
+//   - connection.on('close') внутри startConsumer триггерит startConsumerWithRetry(1)
+//     при unexpected restart брокера.
+//
+// At-least-once delivery: a consumer restart before ack causes redelivery.
+// duplicate emails are possible. idempotent deduplication (processed-events log)
+// is out of scope - see REQUIREMENTS.md Out of Scope. msg.fields.redelivered=true
+// логируется для defense, чтобы было видно факт повторной доставки.
+
+const MAX_RETRIES = 5;
+const INITIAL_RETRY_DELAY_MS = 1000;
+const BACKOFF_MULTIPLIER = 2;
 
 // zod-валидация payload - первый и единственный гейт между брокером и
 // побочными эффектами (email, metrics, log). T-05-07/T-05-08 mitigation.
@@ -40,7 +56,21 @@ const notifications_consumed_total = new Counter({
   registers: [registry],
 });
 
-export async function startConsumer(): Promise<void> {
+// safe-parse productId без выкидывания исключений - используется только в
+// redelivery-логе чтобы оставить productId если получится, иначе null.
+function tryParseProductId(raw: string): string | null {
+  try {
+    const obj = JSON.parse(raw);
+    if (obj && typeof obj.productId === "string") {
+      return obj.productId;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function startConsumer(): Promise<void> {
   const url = process.env.RABBITMQ_URL ?? RABBIT_CONFIG.url;
   if (!url) {
     throw new Error("RABBITMQ_URL env var is required");
@@ -85,6 +115,16 @@ export async function startConsumer(): Promise<void> {
     QUEUE_STOCK_LOW,
     async (msg) => {
       if (msg === null) return;
+
+      // at-least-once: после restart консумера broker re-deliver'нёт unacked msg
+      // с redelivered=true. дубликат email возможен; deduplication out of scope.
+      if (msg.fields.redelivered) {
+        const pid = tryParseProductId(msg.content.toString());
+        console.log(
+          "[notification-service] message redelivered redelivered=true - at-least-once delivery, processing again productId=" +
+            (pid ?? "unknown"),
+        );
+      }
 
       // парс JSON + zod validate. оба гейта up-front: после этого работаем
       // только с типизированным event.
@@ -143,10 +183,48 @@ export async function startConsumer(): Promise<void> {
     { noAck: false },
   );
 
+  // unexpected connection close (broker restart, network drop) - re-entry в
+  // retry loop с attempt=1. INITIAL_RETRY_DELAY_MS дать брокеру встать,
+  // дальше startConsumerWithRetry сам растянет backoff если broker всё ещё down.
+  conn.on("close", () => {
+    console.warn(
+      "[notification-service] RabbitMQ connection closed unexpectedly; reconnecting...",
+    );
+    setTimeout(() => startConsumerWithRetry(1), INITIAL_RETRY_DELAY_MS);
+  });
+
   console.log(
     "[notification-service] consumer started with DLX queue=" +
       QUEUE_STOCK_LOW +
       " dlx=" +
       DLX_EXCHANGE,
   );
+}
+
+// public entry point. wraps startConsumer in exponential backoff retry loop.
+// terminal case (attempt >= MAX_RETRIES) -> process.exit(1), container restart
+// policy (restart:unless-stopped) handles full recovery.
+export async function startConsumerWithRetry(attempt = 1): Promise<void> {
+  try {
+    await startConsumer();
+  } catch (e) {
+    if (attempt >= MAX_RETRIES) {
+      console.error(
+        "[notification-service] FATAL: max RabbitMQ reconnect attempts reached, exiting",
+      );
+      process.exit(1);
+    }
+    const delay =
+      INITIAL_RETRY_DELAY_MS * Math.pow(BACKOFF_MULTIPLIER, attempt - 1);
+    console.warn(
+      "[notification-service] RabbitMQ connection lost, retrying in " +
+        delay +
+        "ms (attempt " +
+        attempt +
+        "/" +
+        MAX_RETRIES +
+        ")",
+    );
+    setTimeout(() => startConsumerWithRetry(attempt + 1), delay);
+  }
 }
