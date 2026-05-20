@@ -1,5 +1,5 @@
 import express, { Request, Response } from "express";
-import { startConsumerWithRetry } from "./consumer";
+import { closeConsumer, startConsumerWithRetry } from "./consumer";
 import { registry } from "./metrics/registry";
 
 const PORT = Number(process.env.SERVER_PORT ?? process.env.PORT ?? 8082);
@@ -33,7 +33,12 @@ async function bootstrap() {
   });
 }
 
-process.on("SIGTERM", () => process.exit(0));
+// graceful shutdown - закрываем consumer channel/connection чтобы in-flight
+// сообщение не зависло. SIGTERM приходит от docker compose stop / k8s.
+process.on("SIGTERM", async () => {
+  await closeConsumer();
+  process.exit(0);
+});
 
 bootstrap().catch((err) => {
   console.error("[notification-service] Failed to start:", err);

@@ -35,15 +35,29 @@ const MAX_RETRIES = 5;
 const INITIAL_RETRY_DELAY_MS = 1000;
 const BACKOFF_MULTIPLIER = 2;
 
+// reconnect state в module scope - единая точка истины. предотвращает гонку
+// между catch path в startConsumerWithRetry и conn.on('close'): оба попадают
+// в scheduleConsumerReconnect, но реальный setTimeout запускается ровно один.
+let reconnectTimer: NodeJS.Timeout | null = null;
+let reconnectAttempt = 0;
+let intentionallyClosed = false;
+
+// текущие connection/channel в module scope - SIGTERM в index.ts закрывает их
+// через closeConsumer(), чтобы не потерять in-flight сообщения.
+let conn: amqp.ChannelModel | null = null;
+let channel: amqp.Channel | null = null;
+
 // zod-валидация payload - первый и единственный гейт между брокером и
 // побочными эффектами (email, metrics, log). T-05-07/T-05-08 mitigation.
+// int().nonnegative() / int().positive() - poisoned producer с available=-1
+// или fractional 0.5 уйдёт в DLQ, а не сгенерирует бессмысленный email.
 const StockLowEventSchema = z.object({
-  productId: z.string(),
-  warehouseId: z.string(),
+  productId: z.string().min(1),
+  warehouseId: z.string().min(1),
   locationId: z.string().optional(),
-  available: z.number(),
-  threshold: z.number(),
-  aggregateId: z.string(),
+  available: z.number().int().nonnegative(),
+  threshold: z.number().int().positive(),
+  aggregateId: z.string().min(1),
   occurredAt: z.string(),
 });
 
@@ -76,8 +90,8 @@ async function startConsumer(): Promise<void> {
     throw new Error("RABBITMQ_URL env var is required");
   }
 
-  const conn = await amqp.connect(url);
-  const ch = await conn.createChannel();
+  const newConn = await amqp.connect(url);
+  const ch = await newConn.createChannel();
 
   // DLX-инфраструктура поднимается первой - direct exchange + durable DLQ,
   // DLQ привязан к DLX по routing-key равному имени main queue
@@ -86,32 +100,46 @@ async function startConsumer(): Promise<void> {
   await ch.assertQueue(DLQ_QUEUE, { durable: true });
   await ch.bindQueue(DLQ_QUEUE, DLX_EXCHANGE, QUEUE_STOCK_LOW);
 
-  // RabbitMQ rejects assertQueue с другими args - Plan 05-01 создал queue без
-  // DLX args, поэтому delete-and-recreate. ifUnused:false и ifEmpty:false:
-  // снести даже если consumer'ы или сообщения есть (для defense-time idempotency).
-  // если queue не существует - первый старт, deleteQueue 404 ловим в catch.
-  try {
-    await ch.deleteQueue(QUEUE_STOCK_LOW, { ifUnused: false, ifEmpty: false });
-  } catch (e) {
-    // queue не существовала - ok, первый старт
-  }
-
-  await ch.assertQueue(QUEUE_STOCK_LOW, {
+  // queue assert-first, delete-on-406 only. предыдущая логика unconditionally
+  // делала deleteQueue на КАЖДЫЙ (re)connect - broker restart терял unacked
+  // сообщения которые иначе redelivered'нулись бы. сейчас: пробуем assertQueue
+  // с актуальными args; если broker отвечает 406 PRECONDITION_FAILED (queue
+  // существует с другими args - migration scenario из Plan 05-01) - открываем
+  // fresh channel (failed канал уже закрыт брокером), сносим, re-assert.
+  const queueArgs = {
     durable: true,
     arguments: {
       "x-dead-letter-exchange": DLX_EXCHANGE,
       "x-dead-letter-routing-key": QUEUE_STOCK_LOW,
     },
-  });
+  };
+  let workingCh = ch;
+  try {
+    await workingCh.assertQueue(QUEUE_STOCK_LOW, queueArgs);
+  } catch (err) {
+    const code = (err as { code?: number }).code;
+    if (code !== 406) throw err;
+    console.warn(
+      "[notification-service] queue exists with incompatible args (406); deleting and re-asserting once",
+    );
+    const ch2 = await newConn.createChannel();
+    await ch2.deleteQueue(QUEUE_STOCK_LOW, { ifUnused: false, ifEmpty: false });
+    await ch2.assertQueue(QUEUE_STOCK_LOW, queueArgs);
+    workingCh = ch2;
+  }
 
   // main exchange + bind тот же что и в Plan 05-01
-  await ch.assertExchange(WAREHOUSE_EXCHANGE, "topic", { durable: true });
-  await ch.bindQueue(QUEUE_STOCK_LOW, WAREHOUSE_EXCHANGE, ROUTING_KEY_STOCK_LOW);
+  await workingCh.assertExchange(WAREHOUSE_EXCHANGE, "topic", { durable: true });
+  await workingCh.bindQueue(
+    QUEUE_STOCK_LOW,
+    WAREHOUSE_EXCHANGE,
+    ROUTING_KEY_STOCK_LOW,
+  );
 
   // prefetch(1) - T-05-09 mitigation
-  await ch.prefetch(1);
+  await workingCh.prefetch(1);
 
-  await ch.consume(
+  await workingCh.consume(
     QUEUE_STOCK_LOW,
     async (msg) => {
       if (msg === null) return;
@@ -136,7 +164,7 @@ async function startConsumer(): Promise<void> {
           "[notification-service] invalid message (routing to DLX): json parse failed:",
           e,
         );
-        ch.nack(msg, false, false);
+        workingCh.nack(msg, false, false);
         notifications_consumed_total.inc({ result: "validation_error" });
         return;
       }
@@ -149,7 +177,7 @@ async function startConsumer(): Promise<void> {
         );
         // nack(allUpTo=false, requeue=false) - DLX подхватит. requeue:true
         // создал бы бесконечный цикл (T-05-08).
-        ch.nack(msg, false, false);
+        workingCh.nack(msg, false, false);
         notifications_consumed_total.inc({ result: "validation_error" });
         return;
       }
@@ -169,28 +197,35 @@ async function startConsumer(): Promise<void> {
       // email - non-fatal: T-05-13 mitigation. ack всё равно, иначе redelivery spiral.
       try {
         await sendLowStockEmail(event);
-        ch.ack(msg);
+        workingCh.ack(msg);
         notifications_consumed_total.inc({ result: "success" });
       } catch (e) {
         console.error(
           "[notification-service] email send failed (non-fatal):",
           e,
         );
-        ch.ack(msg);
+        workingCh.ack(msg);
         notifications_consumed_total.inc({ result: "email_error" });
       }
     },
     { noAck: false },
   );
 
-  // unexpected connection close (broker restart, network drop) - re-entry в
-  // retry loop с attempt=1. INITIAL_RETRY_DELAY_MS дать брокеру встать,
-  // дальше startConsumerWithRetry сам растянет backoff если broker всё ещё down.
-  conn.on("close", () => {
+  // только ПОСЛЕ успешного ch.consume публикуем conn/ch в module scope и
+  // вешаем close-handler. если consume() выше throw'нул, conn.on('close')
+  // НЕ будет привязан, поэтому единственный путь reconnect - catch в
+  // startConsumerWithRetry. это убирает гонку двух scheduler'ов.
+  conn = newConn;
+  channel = workingCh;
+  reconnectAttempt = 0;
+
+  newConn.on("close", () => {
     console.warn(
       "[notification-service] RabbitMQ connection closed unexpectedly; reconnecting...",
     );
-    setTimeout(() => startConsumerWithRetry(1), INITIAL_RETRY_DELAY_MS);
+    conn = null;
+    channel = null;
+    scheduleConsumerReconnect();
   });
 
   console.log(
@@ -201,30 +236,83 @@ async function startConsumer(): Promise<void> {
   );
 }
 
-// public entry point. wraps startConsumer in exponential backoff retry loop.
-// terminal case (attempt >= MAX_RETRIES) -> process.exit(1), container restart
-// policy (restart:unless-stopped) handles full recovery.
-export async function startConsumerWithRetry(attempt = 1): Promise<void> {
+// single-flight reconnect scheduler. оба пути (catch в startConsumerWithRetry,
+// conn.on('close')) идут сюда, реальный setTimeout запускается ровно один -
+// reconnectTimer guard. attempt держится в module scope, MAX_RETRIES enforced
+// глобально (а не per-call как в старой реализации).
+function scheduleConsumerReconnect(): void {
+  if (intentionallyClosed) return;
+  if (reconnectTimer) return;
+  if (reconnectAttempt >= MAX_RETRIES) {
+    console.error(
+      "[notification-service] FATAL: max RabbitMQ reconnect attempts reached, exiting",
+    );
+    process.exit(1);
+  }
+  reconnectAttempt += 1;
+  const delay =
+    INITIAL_RETRY_DELAY_MS *
+    Math.pow(BACKOFF_MULTIPLIER, reconnectAttempt - 1);
+  console.warn(
+    "[notification-service] RabbitMQ connection lost, retrying in " +
+      delay +
+      "ms (attempt " +
+      reconnectAttempt +
+      "/" +
+      MAX_RETRIES +
+      ")",
+  );
+  reconnectTimer = setTimeout(async () => {
+    reconnectTimer = null;
+    try {
+      await startConsumer();
+    } catch (e) {
+      console.error(
+        "[notification-service] consumer reconnect attempt failed:",
+        e,
+      );
+      scheduleConsumerReconnect();
+    }
+  }, delay);
+}
+
+// public entry point. первая попытка - синхронная (await), дальнейшие через
+// scheduleConsumerReconnect. attempt-параметр убран: state в module scope.
+export async function startConsumerWithRetry(): Promise<void> {
   try {
     await startConsumer();
   } catch (e) {
-    if (attempt >= MAX_RETRIES) {
-      console.error(
-        "[notification-service] FATAL: max RabbitMQ reconnect attempts reached, exiting",
-      );
-      process.exit(1);
-    }
-    const delay =
-      INITIAL_RETRY_DELAY_MS * Math.pow(BACKOFF_MULTIPLIER, attempt - 1);
-    console.warn(
-      "[notification-service] RabbitMQ connection lost, retrying in " +
-        delay +
-        "ms (attempt " +
-        attempt +
-        "/" +
-        MAX_RETRIES +
-        ")",
-    );
-    setTimeout(() => startConsumerWithRetry(attempt + 1), delay);
+    console.error("[notification-service] initial consumer start failed:", e);
+    scheduleConsumerReconnect();
   }
+}
+
+// SIGTERM handler в index.ts вызывает closeConsumer() - закрываем channel и
+// connection чтобы in-flight сообщения корректно завершились/redelivered'нулись
+// после перезапуска. intentionallyClosed guard блокирует reconnect-timer.
+export async function closeConsumer(): Promise<void> {
+  intentionallyClosed = true;
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  try {
+    await channel?.close();
+  } catch (e) {
+    console.warn(
+      "[notification-service] channel close error:",
+      (e as Error).message,
+    );
+  }
+  try {
+    await conn?.close();
+  } catch (e) {
+    console.warn(
+      "[notification-service] connection close error:",
+      (e as Error).message,
+    );
+  }
+  channel = null;
+  conn = null;
+  console.log("[notification-service] consumer closed");
 }

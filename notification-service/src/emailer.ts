@@ -4,11 +4,18 @@ import { StockLowEvent } from "../../shared-contracts/src/messaging";
 // Mailpit - anonymous SMTP sink, без auth и без TLS. defaults подобраны под
 // docker-compose service name (mailpit:1025) - локально/в compose работает,
 // snake-case env vars override для dev-запуска.
+function intEnv(name: string, dflt: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return dflt;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new Error(`env ${name}=${raw} is not a positive integer`);
+  }
+  return n;
+}
+
 const MAILPIT_SMTP_HOST = process.env.MAILPIT_SMTP_HOST ?? "mailpit";
-const MAILPIT_SMTP_PORT = parseInt(
-  process.env.MAILPIT_SMTP_PORT ?? "1025",
-  10,
-);
+const MAILPIT_SMTP_PORT = intEnv("MAILPIT_SMTP_PORT", 1025);
 const NOTIFICATION_EMAIL_TO =
   process.env.NOTIFICATION_EMAIL_TO ?? "admin@archfinal.local";
 const NOTIFICATION_EMAIL_FROM = "warehouse@archfinal.local";
