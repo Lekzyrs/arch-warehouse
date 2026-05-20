@@ -3,10 +3,30 @@ import type { StockEvent } from "../domain/eventSchemas";
 import { publishStockLow } from "../messaging/publisher";
 import { resetReadModels } from "./readModels";
 
+// валидация LOW_STOCK_THRESHOLD - читаем один раз на module load, не на каждое событие.
+// non-integer / negative / NaN env value -> throw на старте сервиса, иначе alert
+// тихо отключается (availableAfter <= NaN всегда false).
+function intEnv(name: string, dflt: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return dflt;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 0) {
+    throw new Error(`env ${name}=${raw} is not a non-negative integer`);
+  }
+  return n;
+}
+const LOW_STOCK_THRESHOLD = intEnv("LOW_STOCK_THRESHOLD", 10);
+
 // synchronous projector. вызывается сразу после appendEvents в обработчиках команд.
 // available column GENERATED ALWAYS - проектор пишет on_hand, postgres вычисляет available (T-04-04).
 // все запросы через $N. payload-поля zod-валидированы до этого вызова (T-04-02).
-export async function applyEventToReadModel(event: StockEvent): Promise<void> {
+// publishAlerts=false для replay (rebuildReadModels): replay не должен триггерить
+// побочные эффекты (email storm на исторические low-stock события).
+export async function applyEventToReadModel(
+  event: StockEvent,
+  opts: { publishAlerts?: boolean } = {},
+): Promise<void> {
+  const publishAlerts = opts.publishAlerts ?? true;
   const p = event.payload as Record<string, unknown> & {
     productId: string;
     warehouseId: string;
@@ -17,6 +37,17 @@ export async function applyEventToReadModel(event: StockEvent): Promise<void> {
   const locationId = p.locationId ?? "";
 
   let quantityChange = 0;
+
+  // читаем available ДО upsert: low-stock alert должен срабатывать только на
+  // edge transition (> threshold -> <= threshold), а не на каждое reducing event
+  // ниже threshold. INFINITY если строки ещё нет - первое событие гарантированно
+  // считается переходом с "над threshold".
+  const prevRows = await pool.query<{ available: number | null }>(
+    "SELECT available FROM stock_balances WHERE product_id = $1 AND warehouse_id = $2 AND location_id = $3",
+    [p.productId, p.warehouseId, locationId],
+  );
+  const availableBefore =
+    prevRows.rows[0]?.available ?? Number.POSITIVE_INFINITY;
 
   switch (event.event_type) {
     case "STOCK_IN": {
@@ -31,7 +62,10 @@ export async function applyEventToReadModel(event: StockEvent): Promise<void> {
       break;
     }
     case "STOCK_OUT": {
-      // decide() уже проверил available >= quantity (ES-03), здесь on_hand не уйдёт ниже 0
+      // decide() уже проверил available >= quantity (ES-03), здесь on_hand не уйдёт ниже 0.
+      // если строки нет (INSERT path) - это invariant violation: aggregate гарантирует
+      // прежнее STOCK_IN. логируем warning и пропускаем low-stock publish ниже (нет
+      // реального low-stock state, есть синтетический row с available=0).
       await pool.query(
         `INSERT INTO stock_balances (product_id, warehouse_id, location_id, on_hand, reserved)
          VALUES ($1, $2, $3, 0, 0)
@@ -39,6 +73,11 @@ export async function applyEventToReadModel(event: StockEvent): Promise<void> {
          DO UPDATE SET on_hand = stock_balances.on_hand - $4, updated_at = NOW()`,
         [p.productId, p.warehouseId, locationId, p.quantity],
       );
+      if (!Number.isFinite(availableBefore)) {
+        console.warn(
+          `[stock-service] STOCK_OUT projector: no prior balance row for product=${p.productId} wh=${p.warehouseId} - invariant violation, skipping low-stock publish`,
+        );
+      }
       quantityChange = -(p.quantity ?? 0);
       break;
     }
@@ -143,30 +182,33 @@ export async function applyEventToReadModel(event: StockEvent): Promise<void> {
     event.event_type === "RESERVE" ||
     event.event_type === "COMMIT_RESERVATION";
 
-  if (reducesAvailable) {
-    const LOW_STOCK_THRESHOLD = parseInt(
-      process.env.LOW_STOCK_THRESHOLD ?? "10",
-      10,
+  // edge transition guard: alert только когда available пересекает threshold
+  // СВЕРХУ ВНИЗ (availableBefore > threshold && availableAfter <= threshold).
+  // повторные события ниже threshold НЕ публикуют повторный alert (anti-spam).
+  // дополнительно: publishAlerts=false для replay - rebuildReadModels не должен
+  // триггерить email storm на исторические события.
+  const crossedThreshold =
+    availableBefore > LOW_STOCK_THRESHOLD &&
+    availableAfter <= LOW_STOCK_THRESHOLD;
+
+  if (publishAlerts && reducesAvailable && crossedThreshold) {
+    console.log(
+      `[stock-service] low stock detected productId=${p.productId} available=${availableAfter} threshold=${LOW_STOCK_THRESHOLD}`,
     );
-    if (availableAfter <= LOW_STOCK_THRESHOLD) {
-      console.log(
-        `[stock-service] low stock detected productId=${p.productId} available=${availableAfter} threshold=${LOW_STOCK_THRESHOLD}`,
-      );
-      // best-effort publish. broker outage НЕ должен валить projection write -
-      // try/catch + console.error, никакого re-throw.
-      try {
-        await publishStockLow({
-          productId: p.productId,
-          warehouseId: p.warehouseId,
-          locationId: p.locationId,
-          available: availableAfter,
-          threshold: LOW_STOCK_THRESHOLD,
-          aggregateId: event.aggregate_id,
-          occurredAt: new Date().toISOString(),
-        });
-      } catch (e) {
-        console.error("[stock-service] stock.low publish failed (non-fatal):", e);
-      }
+    // best-effort publish. broker outage НЕ должен валить projection write -
+    // try/catch + console.error, никакого re-throw.
+    try {
+      await publishStockLow({
+        productId: p.productId,
+        warehouseId: p.warehouseId,
+        locationId: p.locationId,
+        available: availableAfter,
+        threshold: LOW_STOCK_THRESHOLD,
+        aggregateId: event.aggregate_id,
+        occurredAt: new Date().toISOString(),
+      });
+    } catch (e) {
+      console.error("[stock-service] stock.low publish failed (non-fatal):", e);
     }
   }
 }
@@ -184,8 +226,10 @@ export async function rebuildReadModels(): Promise<void> {
      ORDER BY occurred_at ASC NULLS LAST, aggregate_id ASC, version ASC`,
   );
 
+  // publishAlerts:false - replay не должен переотправлять исторические low-stock
+  // alerts (email storm + dirty downstream consumers, см. review CR-01).
   for (const row of result.rows) {
-    await applyEventToReadModel(row as StockEvent);
+    await applyEventToReadModel(row as StockEvent, { publishAlerts: false });
   }
 
   console.log(
