@@ -1,11 +1,10 @@
 import express, { Request, Response } from "express";
+import { startConsumer } from "./consumer";
 import { registry } from "./metrics/registry";
 
 const PORT = Number(process.env.SERVER_PORT ?? process.env.PORT ?? 8082);
 
 async function bootstrap() {
-  // нет DB/broker, поэтому bootstrap без await
-
   const app = express();
 
   // shallow liveness: 200 пока процесс жив, без пинга зависимостей
@@ -23,7 +22,18 @@ async function bootstrap() {
       `[notification-service] Metrics on :${PORT}/actuator/prometheus`,
     ),
   );
+
+  // consumer стартует ПОСЛЕ http listen - чтобы k8s/health prober видел /health
+  // даже если RabbitMQ ещё не доступен. consumer fail = crash, restart политикой compose.
+  try {
+    await startConsumer();
+  } catch (e) {
+    console.error("[notification-service] consumer failed to start:", e);
+    process.exit(1);
+  }
 }
+
+process.on("SIGTERM", () => process.exit(0));
 
 bootstrap().catch((err) => {
   console.error("[notification-service] Failed to start:", err);

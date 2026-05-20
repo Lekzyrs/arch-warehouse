@@ -1,5 +1,9 @@
 import express, { Request, Response } from "express";
 import { initSchema } from "./config/db";
+import {
+  closePublisher,
+  connect as connectPublisher,
+} from "./messaging/publisher";
 import { registry } from "./metrics/registry";
 import { adminRouter } from "./routes/admin.router";
 import { commandsRouter } from "./routes/commands.router";
@@ -11,6 +15,23 @@ const PORT = Number(process.env.SERVER_PORT ?? process.env.PORT ?? 8080);
 async function bootstrap() {
   // initSchema под connect retry/backoff. создаёт events + snapshots таблицы
   await withRetry(() => initSchema(), "stock-service");
+
+  // best-effort: publisher падает - сервис всё равно поднимается, projection
+  // через try/catch не уронит запрос. low-stock alert просто молча не уйдёт.
+  try {
+    await connectPublisher();
+  } catch (e) {
+    console.error(
+      "[stock-service] RabbitMQ publisher connection failed (non-fatal):",
+      e,
+    );
+  }
+
+  // graceful shutdown - даём publisher закрыть канал и connection
+  process.on("SIGTERM", async () => {
+    await closePublisher();
+    process.exit(0);
+  });
 
   const app = express();
   app.use(express.json());

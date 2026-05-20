@@ -1,5 +1,6 @@
 import { pool } from "../config/db";
 import type { StockEvent } from "../domain/eventSchemas";
+import { publishStockLow } from "../messaging/publisher";
 import { resetReadModels } from "./readModels";
 
 // synchronous projector. вызывается сразу после appendEvents в обработчиках команд.
@@ -98,12 +99,15 @@ export async function applyEventToReadModel(event: StockEvent): Promise<void> {
       return;
   }
 
-  // читаем on_hand после upsert - нужно для stock_movement.on_hand_after
-  const { rows } = await pool.query<{ on_hand: number }>(
-    "SELECT on_hand FROM stock_balances WHERE product_id = $1 AND warehouse_id = $2 AND location_id = $3",
+  // читаем on_hand + available после upsert. on_hand нужен для stock_movement.on_hand_after,
+  // available - для проверки low-stock threshold (EDA-03). available это GENERATED column
+  // (on_hand - reserved), postgres сам пересчитывает.
+  const { rows } = await pool.query<{ on_hand: number; available: number }>(
+    "SELECT on_hand, available FROM stock_balances WHERE product_id = $1 AND warehouse_id = $2 AND location_id = $3",
     [p.productId, p.warehouseId, locationId],
   );
   const onHandAfter = rows[0]?.on_hand ?? 0;
+  const availableAfter = rows[0]?.available ?? 0;
 
   await pool.query(
     `INSERT INTO stock_movement
@@ -129,6 +133,42 @@ export async function applyEventToReadModel(event: StockEvent): Promise<void> {
   console.log(
     `[stock-service] projected event_type=${event.event_type} product=${p.productId} wh=${p.warehouseId}`,
   );
+
+  // EDA-03: low-stock alert. публикуем только для событий, которые могут уронить
+  // available (STOCK_OUT, ADJUSTMENT, RESERVE, COMMIT_RESERVATION). STOCK_IN/RELEASE
+  // увеличивают available - им сигналить low-stock бессмысленно.
+  const reducesAvailable =
+    event.event_type === "STOCK_OUT" ||
+    event.event_type === "ADJUSTMENT" ||
+    event.event_type === "RESERVE" ||
+    event.event_type === "COMMIT_RESERVATION";
+
+  if (reducesAvailable) {
+    const LOW_STOCK_THRESHOLD = parseInt(
+      process.env.LOW_STOCK_THRESHOLD ?? "10",
+      10,
+    );
+    if (availableAfter <= LOW_STOCK_THRESHOLD) {
+      console.log(
+        `[stock-service] low stock detected productId=${p.productId} available=${availableAfter} threshold=${LOW_STOCK_THRESHOLD}`,
+      );
+      // best-effort publish. broker outage НЕ должен валить projection write -
+      // try/catch + console.error, никакого re-throw.
+      try {
+        await publishStockLow({
+          productId: p.productId,
+          warehouseId: p.warehouseId,
+          locationId: p.locationId,
+          available: availableAfter,
+          threshold: LOW_STOCK_THRESHOLD,
+          aggregateId: event.aggregate_id,
+          occurredAt: new Date().toISOString(),
+        });
+      } catch (e) {
+        console.error("[stock-service] stock.low publish failed (non-fatal):", e);
+      }
+    }
+  }
 }
 
 // deterministic replay (CQRS-05, CQRS-06). admin-only endpoint (T-04-12).
