@@ -6,7 +6,10 @@ import {
 } from "../repositories/eventStore";
 import type {
   AdjustmentPayload,
+  CommitReservationPayload,
   EventPayload,
+  ReleasePayload,
+  ReservePayload,
   StockAggregateState,
   StockEvent,
   StockInPayload,
@@ -53,6 +56,31 @@ export function apply(
         version: event.version,
       };
     }
+    case "RESERVE": {
+      const p = event.payload as ReservePayload;
+      return {
+        ...state,
+        reserved: state.reserved + p.quantity,
+        version: event.version,
+      };
+    }
+    case "RELEASE": {
+      const p = event.payload as ReleasePayload;
+      return {
+        ...state,
+        reserved: Math.max(0, state.reserved - p.quantity),
+        version: event.version,
+      };
+    }
+    case "COMMIT_RESERVATION": {
+      const p = event.payload as CommitReservationPayload;
+      return {
+        ...state,
+        on_hand: state.on_hand - p.quantity,
+        reserved: Math.max(0, state.reserved - p.quantity),
+        version: event.version,
+      };
+    }
     default:
       return state;
   }
@@ -81,6 +109,41 @@ export function decide(
       if (!reason || !VALID_REASON_CODES.includes(reason as never)) {
         throw new DomainError(
           "Invalid reason_code: must be CYCLE_COUNT, DAMAGE, or LOSS",
+        );
+      }
+      return;
+    }
+    case "RESERVE": {
+      // WH-02: available = on_hand - reserved; нельзя резервировать больше доступного
+      const available = state.on_hand - state.reserved;
+      const requested = command.quantity as number;
+      if (requested > available) {
+        throw new DomainError(
+          `Insufficient available stock: available=${available}, requested=${requested}`,
+        );
+      }
+      return;
+    }
+    case "RELEASE": {
+      const requested = command.quantity as number;
+      if (requested > state.reserved) {
+        throw new DomainError(
+          `Cannot release more than currently reserved: reserved=${state.reserved}, requested=${requested}`,
+        );
+      }
+      return;
+    }
+    case "COMMIT_RESERVATION": {
+      const requested = command.quantity as number;
+      if (requested > state.reserved) {
+        throw new DomainError(
+          `Cannot commit more than currently reserved: reserved=${state.reserved}, requested=${requested}`,
+        );
+      }
+      // defensive: reserve guard уже должен был это поймать, но не доверяем
+      if (requested > state.on_hand) {
+        throw new DomainError(
+          `Cannot commit more than on_hand: on_hand=${state.on_hand}, requested=${requested}`,
         );
       }
       return;
