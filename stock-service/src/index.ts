@@ -2,6 +2,7 @@ import express, { Request, Response } from "express";
 import { initSchema } from "./config/db";
 import { registry } from "./metrics/registry";
 import { commandsRouter } from "./routes/commands.router";
+import { queryRouter } from "./routes/query.router";
 import { withRetry } from "./utils/retry";
 
 const PORT = Number(process.env.SERVER_PORT ?? process.env.PORT ?? 8080);
@@ -22,9 +23,14 @@ async function bootstrap() {
     res.end(await registry.metrics());
   });
 
-  // POST /stock/stock-in -> append event в events table (ES-01)
-  app.use("/stock", commandsRouter);
-  console.log("[stock-service] Stock command routes registered");
+  // POST /stock/commands/stock-in -> append event в events table (ES-01)
+  // remount под /stock/commands - чтобы GET /stock и POST /stock/commands/* не конфликтовали
+  app.use("/stock/commands", commandsRouter);
+  console.log("[stock-service] Stock command routes registered at /stock/commands");
+
+  // GET /stock - читает stock_balances (CQRS-02 physical separation)
+  app.use("/stock", queryRouter);
+  console.log("[stock-service] Query routes registered at /stock");
 
   app.listen(PORT, () =>
     console.log(`[stock-service] Listening on http://0.0.0.0:${PORT}`),

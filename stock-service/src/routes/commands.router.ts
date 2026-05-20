@@ -19,6 +19,7 @@ import {
   loadAggregate,
 } from "../domain/stockAggregate";
 import { registry } from "../metrics/registry";
+import { applyEventToReadModel } from "../read/projector";
 
 // command DTO. aggregateId = одна aggregate-stream на пару product+warehouse
 const StockInCommandSchema = z.object({
@@ -105,6 +106,15 @@ commandsRouter.post(
         [{ event_type: "STOCK_IN", payload }],
         nextVersion,
       );
+      // sync projection (CQRS-03 read-your-writes). projection fail = stale read model, rethrow для 500
+      try {
+        for (const evt of appended) {
+          await applyEventToReadModel(evt);
+        }
+      } catch (e) {
+        console.error("[stock-service] projection failed for event:", e);
+        throw e;
+      }
       commandsTotal.inc({ command_type: "STOCK_IN", result: "success" });
       console.log(
         `[stock-service] STOCK_IN aggregate=${cmd.aggregateId} v=${appended[0].version}`,
@@ -161,6 +171,14 @@ commandsRouter.post(
         [{ event_type: "STOCK_OUT", payload }],
         nextVersion,
       );
+      try {
+        for (const evt of appended) {
+          await applyEventToReadModel(evt);
+        }
+      } catch (e) {
+        console.error("[stock-service] projection failed for event:", e);
+        throw e;
+      }
       commandsTotal.inc({ command_type: "STOCK_OUT", result: "success" });
       console.log(
         `[stock-service] STOCK_OUT aggregate=${cmd.aggregateId} v=${appended[0].version}`,
@@ -222,6 +240,14 @@ commandsRouter.post(
         [{ event_type: "ADJUSTMENT", payload }],
         nextVersion,
       );
+      try {
+        for (const evt of appended) {
+          await applyEventToReadModel(evt);
+        }
+      } catch (e) {
+        console.error("[stock-service] projection failed for event:", e);
+        throw e;
+      }
       commandsTotal.inc({ command_type: "ADJUSTMENT", result: "success" });
       console.log(
         `[stock-service] ADJUSTMENT aggregate=${cmd.aggregateId} reason=${cmd.reason_code} v=${appended[0].version}`,
