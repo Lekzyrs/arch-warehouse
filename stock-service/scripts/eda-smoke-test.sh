@@ -76,6 +76,11 @@ echo ""
 
 # ---------- STEP 3: restart RabbitMQ ----------
 echo "STEP 3: Restarting RabbitMQ broker..."
+# фиксируем timestamp ДО restart - дальше docker logs --since $RESTART_TS
+# смотрит только пост-restart строки. без этого grep ловил "consumer started"
+# из исходного startup внутри --since 30s окна и assertion проходил без
+# реального reconnect.
+RESTART_TS=$(date +%s)
 if ! docker compose restart rabbitmq 2>/dev/null; then
   echo "  docker compose restart rabbitmq failed; falling back to docker restart $RABBIT_CONTAINER"
   if ! docker restart "$RABBIT_CONTAINER" >/dev/null 2>&1; then
@@ -86,7 +91,10 @@ fi
 echo "  waiting 20s for RabbitMQ to start + consumer to reconnect..."
 sleep 20
 
-RECONNECT_HITS=$(docker logs "$NOTIF_CONTAINER" --since 30s 2>&1 | grep -cE "reconnect|consumer started|connection lost")
+# grep по строкам, специфичным для пост-restart пути: "connection closed
+# unexpectedly" (conn.on('close')) или "consumer reconnect attempt failed"
+# (scheduleConsumerReconnect retry log). не матчим generic "consumer started".
+RECONNECT_HITS=$(docker logs "$NOTIF_CONTAINER" --since "$RESTART_TS" 2>&1 | grep -cE "connection closed unexpectedly|retrying in")
 if [ "$RECONNECT_HITS" -lt 1 ]; then
   echo "STEP 3 WARNING: no reconnect log found - consumer may not have reconnected yet (check manually)"
 else
