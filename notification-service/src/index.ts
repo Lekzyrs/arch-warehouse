@@ -1,5 +1,5 @@
 import express, { Request, Response } from "express";
-import { startConsumer } from "./consumer";
+import { startConsumerWithRetry } from "./consumer";
 import { registry } from "./metrics/registry";
 
 const PORT = Number(process.env.SERVER_PORT ?? process.env.PORT ?? 8082);
@@ -24,13 +24,13 @@ async function bootstrap() {
   );
 
   // consumer стартует ПОСЛЕ http listen - чтобы k8s/health prober видел /health
-  // даже если RabbitMQ ещё не доступен. consumer fail = crash, restart политикой compose.
-  try {
-    await startConsumer();
-  } catch (e) {
-    console.error("[notification-service] consumer failed to start:", e);
+  // даже если RabbitMQ ещё не доступен. retry-обёртка сама делает exponential
+  // backoff (max 5 попыток, 1s/2s/4s/8s/16s) и process.exit(1) на терминальной
+  // отказе - restart:unless-stopped поднимет контейнер.
+  startConsumerWithRetry().catch((e) => {
+    console.error("[notification-service] consumer retry loop failed:", e);
     process.exit(1);
-  }
+  });
 }
 
 process.on("SIGTERM", () => process.exit(0));
