@@ -21,15 +21,18 @@ const INITIAL_RECONNECT_DELAY_MS = 1000;
 const RECONNECT_BACKOFF_MULTIPLIER = 2;
 let reconnectAttempt = 0;
 let intentionallyClosed = false;
+let reconnectTimer: NodeJS.Timeout | null = null;
 
+// single-flight scheduler. connection.on('error') и channel.on('close') оба
+// зовут эту функцию при broker restart, но реальный setTimeout запускается
+// один - reconnectTimer guard. без этого создавались параллельные timer'ы,
+// два connect() в гонке, leaked listeners.
 function schedulePublisherReconnect(): void {
-  if (intentionallyClosed) {
-    // closePublisher() выставил flag - не пытаемся подняться обратно
-    return;
-  }
+  if (intentionallyClosed) return;
+  if (reconnectTimer) return;
   if (reconnectAttempt >= MAX_RECONNECT_ATTEMPTS) {
     console.error(
-      "[stock-service] FATAL: publisher max reconnect attempts reached",
+      "[stock-service] publisher giving up reconnect attempts; stock.low alerts will not publish until restart",
     );
     return;
   }
@@ -44,8 +47,23 @@ function schedulePublisherReconnect(): void {
       delay +
       "ms",
   );
-  setTimeout(async () => {
+  reconnectTimer = setTimeout(async () => {
+    reconnectTimer = null;
     try {
+      // закрываем старые объекты перед reassign в connect() - старый channel
+      // мог не успеть GC'нуться, leaked listeners складываются между попытками.
+      try {
+        await channel?.close();
+      } catch {
+        // close failure не критичен - либо уже закрыт, либо connection dead
+      }
+      try {
+        await connection?.close();
+      } catch {
+        // same
+      }
+      channel = null;
+      connection = null;
       await connect();
       reconnectAttempt = 0;
       console.log("[stock-service] publisher reconnected");
@@ -116,11 +134,28 @@ export async function closePublisher(): Promise<void> {
   // на intentional shutdown (SIGTERM из docker compose stop).
   intentionallyClosed = true;
   reconnectAttempt = MAX_RECONNECT_ATTEMPTS;
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  // channel.close() и connection.close() в раздельных try - если первый
+  // throw'нул (например, канал уже закрыт), connection всё равно надо закрыть,
+  // иначе TCP соединение висит до broker timeout.
   try {
     await channel?.close();
+  } catch (e) {
+    console.warn(
+      "[stock-service] channel close error:",
+      (e as Error).message,
+    );
+  }
+  try {
     await connection?.close();
-  } catch {
-    // closing best-effort, отдельный error не критичен на shutdown
+  } catch (e) {
+    console.warn(
+      "[stock-service] connection close error:",
+      (e as Error).message,
+    );
   }
   channel = null;
   connection = null;
