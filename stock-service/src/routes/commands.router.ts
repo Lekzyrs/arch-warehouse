@@ -9,7 +9,10 @@ import { z } from "zod";
 import { ConflictError, DomainError } from "../domain/errors";
 import {
   AdjustmentPayloadSchema,
+  CommitReservationPayloadSchema,
   ReasonCode,
+  ReleasePayloadSchema,
+  ReservePayloadSchema,
   StockInPayloadSchema,
   StockOutPayloadSchema,
 } from "../domain/eventSchemas";
@@ -48,6 +51,37 @@ const AdjustmentCommandSchema = z.object({
   quantity_delta: z.number().int(),
   reason_code: ReasonCode,
   notes: z.string().optional(),
+  performedBy: z.string().optional(),
+});
+
+// WH-02 reserve. reservationId - correlation key для последующего release/commit
+const ReserveCommandSchema = z.object({
+  aggregateId: z.string().min(1),
+  productId: z.string().min(1),
+  warehouseId: z.string().min(1),
+  locationId: z.string().optional(),
+  quantity: z.number().int().positive(),
+  reservationId: z.string().min(1),
+  performedBy: z.string().optional(),
+});
+
+const ReleaseCommandSchema = z.object({
+  aggregateId: z.string().min(1),
+  productId: z.string().min(1),
+  warehouseId: z.string().min(1),
+  locationId: z.string().optional(),
+  quantity: z.number().int().positive(),
+  reservationId: z.string().min(1),
+  performedBy: z.string().optional(),
+});
+
+const CommitReservationCommandSchema = z.object({
+  aggregateId: z.string().min(1),
+  productId: z.string().min(1),
+  warehouseId: z.string().min(1),
+  locationId: z.string().optional(),
+  quantity: z.number().int().positive(),
+  reservationId: z.string().min(1),
   performedBy: z.string().optional(),
 });
 
@@ -261,6 +295,225 @@ commandsRouter.post(
     } catch (err) {
       if (err instanceof ConflictError) {
         commandsTotal.inc({ command_type: "ADJUSTMENT", result: "conflict" });
+        return res.status(409).json({ error: err.message });
+      }
+      throw err;
+    }
+  }),
+);
+
+// WH-02: POST /reserve - резервирует quantity. available -= quantity, on_hand без изменений
+commandsRouter.post(
+  "/reserve",
+  wrap(async (req, res) => {
+    const parsed = ReserveCommandSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ errors: parsed.error.issues });
+    }
+    const cmd = parsed.data;
+
+    const { state, nextVersion } = await loadAggregate(cmd.aggregateId);
+
+    try {
+      decide(state, {
+        type: "RESERVE",
+        quantity: cmd.quantity,
+        reservationId: cmd.reservationId,
+      });
+    } catch (err) {
+      if (err instanceof DomainError) {
+        commandsTotal.inc({ command_type: "RESERVE", result: "rejected" });
+        return res.status(422).json({ error: err.message });
+      }
+      throw err;
+    }
+
+    const payload = ReservePayloadSchema.parse({
+      event_type: "RESERVE",
+      productId: cmd.productId,
+      warehouseId: cmd.warehouseId,
+      locationId: cmd.locationId,
+      quantity: cmd.quantity,
+      reservationId: cmd.reservationId,
+      performedBy: cmd.performedBy,
+    });
+
+    try {
+      const appended = await appendEvents(
+        cmd.aggregateId,
+        [{ event_type: "RESERVE", payload }],
+        nextVersion,
+      );
+      try {
+        for (const evt of appended) {
+          await applyEventToReadModel(evt);
+        }
+      } catch (e) {
+        console.error("[stock-service] projection failed for event:", e);
+        throw e;
+      }
+      commandsTotal.inc({ command_type: "RESERVE", result: "success" });
+      console.log(
+        `[stock-service] RESERVE aggregate=${cmd.aggregateId} res=${cmd.reservationId} v=${appended[0].version}`,
+      );
+      return res.status(200).json({
+        aggregateId: cmd.aggregateId,
+        version: appended[0].version,
+        event_type: "RESERVE",
+        payload,
+      });
+    } catch (err) {
+      if (err instanceof ConflictError) {
+        commandsTotal.inc({ command_type: "RESERVE", result: "conflict" });
+        return res.status(409).json({ error: err.message });
+      }
+      throw err;
+    }
+  }),
+);
+
+// POST /release - отменяет резервацию. reserved -= quantity
+commandsRouter.post(
+  "/release",
+  wrap(async (req, res) => {
+    const parsed = ReleaseCommandSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ errors: parsed.error.issues });
+    }
+    const cmd = parsed.data;
+
+    const { state, nextVersion } = await loadAggregate(cmd.aggregateId);
+
+    try {
+      decide(state, {
+        type: "RELEASE",
+        quantity: cmd.quantity,
+        reservationId: cmd.reservationId,
+      });
+    } catch (err) {
+      if (err instanceof DomainError) {
+        commandsTotal.inc({ command_type: "RELEASE", result: "rejected" });
+        return res.status(422).json({ error: err.message });
+      }
+      throw err;
+    }
+
+    const payload = ReleasePayloadSchema.parse({
+      event_type: "RELEASE",
+      productId: cmd.productId,
+      warehouseId: cmd.warehouseId,
+      locationId: cmd.locationId,
+      quantity: cmd.quantity,
+      reservationId: cmd.reservationId,
+      performedBy: cmd.performedBy,
+    });
+
+    try {
+      const appended = await appendEvents(
+        cmd.aggregateId,
+        [{ event_type: "RELEASE", payload }],
+        nextVersion,
+      );
+      try {
+        for (const evt of appended) {
+          await applyEventToReadModel(evt);
+        }
+      } catch (e) {
+        console.error("[stock-service] projection failed for event:", e);
+        throw e;
+      }
+      commandsTotal.inc({ command_type: "RELEASE", result: "success" });
+      console.log(
+        `[stock-service] RELEASE aggregate=${cmd.aggregateId} res=${cmd.reservationId} v=${appended[0].version}`,
+      );
+      return res.status(200).json({
+        aggregateId: cmd.aggregateId,
+        version: appended[0].version,
+        event_type: "RELEASE",
+        payload,
+      });
+    } catch (err) {
+      if (err instanceof ConflictError) {
+        commandsTotal.inc({ command_type: "RELEASE", result: "conflict" });
+        return res.status(409).json({ error: err.message });
+      }
+      throw err;
+    }
+  }),
+);
+
+// POST /commit-reservation - товар уходит. on_hand -= quantity И reserved -= quantity
+commandsRouter.post(
+  "/commit-reservation",
+  wrap(async (req, res) => {
+    const parsed = CommitReservationCommandSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ errors: parsed.error.issues });
+    }
+    const cmd = parsed.data;
+
+    const { state, nextVersion } = await loadAggregate(cmd.aggregateId);
+
+    try {
+      decide(state, {
+        type: "COMMIT_RESERVATION",
+        quantity: cmd.quantity,
+        reservationId: cmd.reservationId,
+      });
+    } catch (err) {
+      if (err instanceof DomainError) {
+        commandsTotal.inc({
+          command_type: "COMMIT_RESERVATION",
+          result: "rejected",
+        });
+        return res.status(422).json({ error: err.message });
+      }
+      throw err;
+    }
+
+    const payload = CommitReservationPayloadSchema.parse({
+      event_type: "COMMIT_RESERVATION",
+      productId: cmd.productId,
+      warehouseId: cmd.warehouseId,
+      locationId: cmd.locationId,
+      quantity: cmd.quantity,
+      reservationId: cmd.reservationId,
+      performedBy: cmd.performedBy,
+    });
+
+    try {
+      const appended = await appendEvents(
+        cmd.aggregateId,
+        [{ event_type: "COMMIT_RESERVATION", payload }],
+        nextVersion,
+      );
+      try {
+        for (const evt of appended) {
+          await applyEventToReadModel(evt);
+        }
+      } catch (e) {
+        console.error("[stock-service] projection failed for event:", e);
+        throw e;
+      }
+      commandsTotal.inc({
+        command_type: "COMMIT_RESERVATION",
+        result: "success",
+      });
+      console.log(
+        `[stock-service] COMMIT_RESERVATION aggregate=${cmd.aggregateId} res=${cmd.reservationId} v=${appended[0].version}`,
+      );
+      return res.status(200).json({
+        aggregateId: cmd.aggregateId,
+        version: appended[0].version,
+        event_type: "COMMIT_RESERVATION",
+        payload,
+      });
+    } catch (err) {
+      if (err instanceof ConflictError) {
+        commandsTotal.inc({
+          command_type: "COMMIT_RESERVATION",
+          result: "conflict",
+        });
         return res.status(409).json({ error: err.message });
       }
       throw err;

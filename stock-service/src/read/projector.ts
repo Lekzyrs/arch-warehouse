@@ -52,6 +52,44 @@ export async function applyEventToReadModel(event: StockEvent): Promise<void> {
       quantityChange = p.quantity_delta ?? 0;
       break;
     }
+    case "RESERVE": {
+      // WH-02: reserve не меняет on_hand. available пересчитается postgres'ом (GENERATED).
+      // upsert чтобы первое событие на product+warehouse не упало (хотя обычно RESERVE идёт после STOCK_IN)
+      await pool.query(
+        `INSERT INTO stock_balances (product_id, warehouse_id, location_id, on_hand, reserved)
+         VALUES ($1, $2, $3, 0, $4)
+         ON CONFLICT (product_id, warehouse_id, location_id)
+         DO UPDATE SET reserved = stock_balances.reserved + $4, updated_at = NOW()`,
+        [p.productId, p.warehouseId, locationId, p.quantity],
+      );
+      quantityChange = 0; // физически товар не двигается
+      break;
+    }
+    case "RELEASE": {
+      await pool.query(
+        `INSERT INTO stock_balances (product_id, warehouse_id, location_id, on_hand, reserved)
+         VALUES ($1, $2, $3, 0, 0)
+         ON CONFLICT (product_id, warehouse_id, location_id)
+         DO UPDATE SET reserved = GREATEST(0, stock_balances.reserved - $4), updated_at = NOW()`,
+        [p.productId, p.warehouseId, locationId, p.quantity],
+      );
+      quantityChange = 0;
+      break;
+    }
+    case "COMMIT_RESERVATION": {
+      // товар уходит со склада: on_hand -= quantity И reserved -= quantity
+      await pool.query(
+        `INSERT INTO stock_balances (product_id, warehouse_id, location_id, on_hand, reserved)
+         VALUES ($1, $2, $3, 0, 0)
+         ON CONFLICT (product_id, warehouse_id, location_id)
+         DO UPDATE SET on_hand = stock_balances.on_hand - $4,
+                       reserved = GREATEST(0, stock_balances.reserved - $4),
+                       updated_at = NOW()`,
+        [p.productId, p.warehouseId, locationId, p.quantity],
+      );
+      quantityChange = -(p.quantity ?? 0);
+      break;
+    }
     default:
       console.log(
         `[stock-service] projector: unknown event_type=${event.event_type} - skipped (forward-compat)`,
