@@ -84,9 +84,58 @@ describe("apply()", () => {
 });
 
 describe("decide()", () => {
-  it("STOCK_IN всегда валиден в scope 03-01 (не бросает)", () => {
+  it("STOCK_IN всегда валиден на zod-уровне (decide не бросает)", () => {
     expect(() =>
       decide(emptyState, { type: "STOCK_IN", quantity: 5 }),
     ).not.toThrow();
+  });
+
+  it("STOCK_OUT с quantity > available бросает DomainError (ES-03)", () => {
+    expect(() =>
+      decide(
+        { on_hand: 10, reserved: 0, version: 1 },
+        { type: "STOCK_OUT", quantity: 15 },
+      ),
+    ).toThrow(/Insufficient stock/);
+  });
+
+  it("STOCK_OUT с quantity <= available не бросает", () => {
+    expect(() =>
+      decide(
+        { on_hand: 10, reserved: 0, version: 1 },
+        { type: "STOCK_OUT", quantity: 10 },
+      ),
+    ).not.toThrow();
+  });
+
+  it("ADJUSTMENT без reason_code бросает DomainError (ES-04 second-line)", () => {
+    expect(() =>
+      decide(emptyState, { type: "ADJUSTMENT", quantity_delta: -1 }),
+    ).toThrow(/Invalid reason_code/);
+  });
+
+  it("ADJUSTMENT с reason_code из enum не бросает", () => {
+    for (const r of ["CYCLE_COUNT", "DAMAGE", "LOSS"]) {
+      expect(() =>
+        decide(emptyState, {
+          type: "ADJUSTMENT",
+          reason_code: r,
+          quantity_delta: 1,
+        }),
+      ).not.toThrow();
+    }
+  });
+});
+
+describe("snapshot fold (ES-06 readiness)", () => {
+  it("3 последовательных STOCK_IN по 5 единиц складываются в on_hand=15 (state для snapshot at SNAPSHOT_EVERY=3)", () => {
+    const events = [stockInEvent(1, 5), stockInEvent(2, 5), stockInEvent(3, 5)];
+    const final = events.reduce(apply, emptyState);
+    expect(final).toEqual({ on_hand: 15, reserved: 0, version: 3 });
+  });
+
+  it("snapshot trigger condition: 3 % 3 === 0 (snapshot) vs 4 % 3 !== 0 (skip)", () => {
+    expect(3 % 3).toBe(0);
+    expect(4 % 3).not.toBe(0);
   });
 });

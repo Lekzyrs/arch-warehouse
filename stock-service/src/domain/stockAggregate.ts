@@ -1,4 +1,9 @@
-import { appendEvent, getEvents } from "../repositories/eventStore";
+import {
+  appendEvent,
+  getEvents,
+  getLatestSnapshot,
+  saveSnapshot,
+} from "../repositories/eventStore";
 import type {
   AdjustmentPayload,
   EventPayload,
@@ -86,18 +91,22 @@ export function decide(
   }
 }
 
-// rehydrate по логу событий. snapshot fast-path добавляется в Plan 03-03
+// rehydrate. snapshot fast-path (ES-06): snapshot + tail events эквивалентны full replay
 export async function loadAggregate(
   aggregateId: string,
 ): Promise<{ state: StockAggregateState; nextVersion: number }> {
-  const events = await getEvents(aggregateId, 0);
-  const state = events.reduce(apply, emptyState);
+  const snap = await getLatestSnapshot(aggregateId);
+  const baseVersion = snap?.version ?? 0;
+  const baseState = snap?.state ?? emptyState;
+  const tail = await getEvents(aggregateId, baseVersion);
+  const state = tail.reduce(apply, baseState);
   const nextVersion =
-    events.length === 0 ? 1 : events[events.length - 1].version + 1;
+    tail.length === 0 ? baseVersion + 1 : tail[tail.length - 1].version + 1;
   return { state, nextVersion };
 }
 
 // append по одному с проверкой версии. PG 23505 (unique_violation) -> ConflictError (HTTP 409)
+// после успешного append если newVersion % SNAPSHOT_EVERY === 0 - пишем snapshot (best-effort)
 export async function appendEvents(
   aggregateId: string,
   newEvents: Array<{ event_type: string; payload: EventPayload }>,
@@ -124,5 +133,28 @@ export async function appendEvents(
       throw err;
     }
   }
+
+  // snapshot trigger. SNAPSHOT_EVERY=50 по умолчанию, для defense ставится =3
+  const SNAPSHOT_EVERY = Number.parseInt(
+    process.env.SNAPSHOT_EVERY ?? "50",
+    10,
+  );
+  const newVersion = appended[appended.length - 1].version;
+  if (newVersion % SNAPSHOT_EVERY === 0) {
+    try {
+      // re-call getLatestSnapshot - не используем stale outer-scope (T-03-13)
+      const snap = await getLatestSnapshot(aggregateId);
+      const tail = await getEvents(aggregateId, snap?.version ?? 0);
+      const foldedState = tail.reduce(apply, snap?.state ?? emptyState);
+      await saveSnapshot(aggregateId, newVersion, foldedState);
+      console.log(
+        `[stock-service] snapshot saved aggregate=${aggregateId} version=${newVersion}`,
+      );
+    } catch (e) {
+      // T-03-14: snapshot failure не блокирует уже committed events
+      console.error("[stock-service] snapshot write failed:", e);
+    }
+  }
+
   return appended;
 }

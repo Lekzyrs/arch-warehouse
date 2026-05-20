@@ -1,5 +1,9 @@
 import { pool } from "../config/db";
-import type { EventPayload, StockEvent } from "../domain/eventSchemas";
+import type {
+  EventPayload,
+  StockAggregateState,
+  StockEvent,
+} from "../domain/eventSchemas";
 
 // все запросы через $N. конкатенация user-input в SQL запрещена (T-03-01)
 // events table - append-only, только INSERT/SELECT. UPDATE/DELETE запрещены (T-03-02, ES-01)
@@ -33,4 +37,33 @@ export async function appendEvent(
     event.payload as EventPayload,
   ]);
   return rows[0];
+}
+
+// последний snapshot или null если нет ни одного. fast-path в loadAggregate (ES-06)
+export async function getLatestSnapshot(
+  aggregateId: string,
+): Promise<{ version: number; state: StockAggregateState } | null> {
+  const { rows } = await pool.query<{
+    aggregate_id: string;
+    version: number;
+    state: StockAggregateState;
+    created_at: Date;
+  }>(
+    "SELECT aggregate_id, version, state, created_at FROM snapshots WHERE aggregate_id = $1 ORDER BY version DESC LIMIT 1",
+    [aggregateId],
+  );
+  if (rows.length === 0) return null;
+  return { version: rows[0].version, state: rows[0].state };
+}
+
+// идемпотентный insert. ON CONFLICT DO NOTHING - повторный save той же version - no-op
+export async function saveSnapshot(
+  aggregateId: string,
+  version: number,
+  state: StockAggregateState,
+): Promise<void> {
+  await pool.query(
+    "INSERT INTO snapshots (aggregate_id, version, state) VALUES ($1, $2, $3) ON CONFLICT (aggregate_id, version) DO NOTHING",
+    [aggregateId, version, state],
+  );
 }
