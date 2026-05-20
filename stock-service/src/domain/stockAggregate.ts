@@ -1,11 +1,15 @@
 import { appendEvent, getEvents } from "../repositories/eventStore";
 import type {
+  AdjustmentPayload,
   EventPayload,
   StockAggregateState,
   StockEvent,
   StockInPayload,
+  StockOutPayload,
 } from "./eventSchemas";
-import { ConflictError } from "./errors";
+import { ConflictError, DomainError } from "./errors";
+
+const VALID_REASON_CODES = ["CYCLE_COUNT", "DAMAGE", "LOSS"] as const;
 
 // pure начальное состояние. version=0 = ни одного события не применено
 export const emptyState: StockAggregateState = {
@@ -15,7 +19,6 @@ export const emptyState: StockAggregateState = {
 };
 
 // pure fold. неизвестный event_type - state без изменений (forward-compat)
-// STOCK_OUT и ADJUSTMENT кейсы добавляются в Plan 03-02
 export function apply(
   state: StockAggregateState,
   event: StockEvent,
@@ -29,18 +32,58 @@ export function apply(
         version: event.version,
       };
     }
+    case "STOCK_OUT": {
+      const p = event.payload as StockOutPayload;
+      return {
+        ...state,
+        on_hand: state.on_hand - p.quantity,
+        version: event.version,
+      };
+    }
+    case "ADJUSTMENT": {
+      const p = event.payload as AdjustmentPayload;
+      return {
+        ...state,
+        on_hand: state.on_hand + p.quantity_delta,
+        version: event.version,
+      };
+    }
     default:
       return state;
   }
 }
 
-// pure валидация. STOCK_IN в scope 03-01 всегда валиден (нет инвариантов)
-// STOCK_OUT и ADJUSTMENT guards добавляются в Plan 03-02
+// pure валидация. STOCK_IN валиден на zod-уровне (positive quantity)
+// STOCK_OUT: available = on_hand - reserved (ES-03)
+// ADJUSTMENT: reason_code из enum (ES-04). zod ловит первым, decide - second-line
 export function decide(
-  _state: StockAggregateState,
-  _command: { type: string; [key: string]: unknown },
+  state: StockAggregateState,
+  command: { type: string; [key: string]: unknown },
 ): void {
-  // no-op в 03-01
+  switch (command.type) {
+    case "STOCK_OUT": {
+      const available = state.on_hand - state.reserved;
+      const requested = command.quantity as number;
+      if (requested > available) {
+        throw new DomainError(
+          `Insufficient stock: available=${available}, requested=${requested}`,
+        );
+      }
+      return;
+    }
+    case "ADJUSTMENT": {
+      const reason = command.reason_code as string | undefined;
+      if (!reason || !VALID_REASON_CODES.includes(reason as never)) {
+        throw new DomainError(
+          "Invalid reason_code: must be CYCLE_COUNT, DAMAGE, or LOSS",
+        );
+      }
+      return;
+    }
+    default:
+      // STOCK_IN и неизвестные типы - no-op
+      return;
+  }
 }
 
 // rehydrate по логу событий. snapshot fast-path добавляется в Plan 03-03
