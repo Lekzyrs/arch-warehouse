@@ -7,6 +7,7 @@ import {
 import { registry } from "./metrics/registry";
 import { adminRouter } from "./routes/admin.router";
 import { commandsRouter } from "./routes/commands.router";
+import { dashboardRouter } from "./routes/dashboard.router";
 import { queryRouter } from "./routes/query.router";
 import { withRetry } from "./utils/retry";
 
@@ -57,6 +58,10 @@ async function bootstrap() {
   // POST /admin/replay - rebuild read model (CQRS-05/06, X-Admin-Key gated)
   app.use("/admin", adminRouter);
   console.log("[stock-service] Admin routes registered at /admin");
+
+  // GET /dashboard - server-rendered event store index (aggregate list + recent events)
+  app.use("/dashboard", dashboardRouter);
+  console.log("[stock-service] Dashboard routes registered at /dashboard");
 
   app.listen(PORT, () =>
     console.log(`[stock-service] Listening on http://0.0.0.0:${PORT}`),
