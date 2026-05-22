@@ -15,11 +15,9 @@ git clone <repo-url>
 cd archfinal
 docker compose up -d --build
 sleep 45
-# гарантированный rewire publisher stock-service после healthy RabbitMQ
-docker compose restart stock-service
 ```
 
-Подождать ~30-45 секунд (контейнеры стартуют через `depends_on: condition: service_healthy`). `restart stock-service` страхует от случая, когда RabbitMQ становится healthy позже stock-service на холодном `up --build` — после рестарта publisher гарантированно подключён (см. также Troubleshooting #4). После этого все endpoint'ы доступны:
+Подождать ~30-45 секунд (контейнеры стартуют через `depends_on: condition: service_healthy`). Если RabbitMQ становится healthy позже stock-service на холодном `up --build`, publisher сам перепoдключится по экспоненциальному backoff (1s → 2s → 4s → 8s → 16s, до 5 попыток) — никакого ручного restart не нужно. После этого все endpoint'ы доступны:
 
 | Что                                  | URL                              |
 | ------------------------------------ | -------------------------------- |
@@ -60,13 +58,10 @@ docker compose restart stock-service
 docker compose down -v
 docker compose up -d --build
 sleep 45
-# rewire publisher stock-service после healthy RabbitMQ
-docker compose restart stock-service
-sleep 5
 docker compose ps
 ```
 
-Все десять контейнеров должны быть в состоянии `Up` (и `healthy` там, где есть healthcheck). После рестарта в логах stock-service: `publisher connected to RabbitMQ exchange=warehouse.exchange`.
+Все десять контейнеров должны быть в состоянии `Up` (и `healthy` там, где есть healthcheck). В логах stock-service видна строка `publisher connected to RabbitMQ exchange=warehouse.exchange` — если RabbitMQ стал healthy после stock-service, publisher автоматически переподключается за 1-16 секунд (без ручного restart).
 
 ### Шаг 1 - R1: ≥3 контейнерных сервиса, единый `docker compose up`
 
@@ -347,13 +342,7 @@ archfinal/
 
 а) Остаток не пересёк порог `LOW_STOCK_THRESHOLD=10` СВЕРХУ ВНИЗ — alert не сработает, если изначально остаток уже был ≤10. Нужен переход с `>threshold` к `<=threshold` одной командой stock-out.
 
-б) Publisher stock-service не успел подключиться к RabbitMQ на первом старте (в логах видно `publish skipped (reconnecting)`). На холодном `docker compose up -d --build` RabbitMQ становится healthy позже stock-service, и initial `connect()` падает с ECONNREFUSED. Восстановление одной командой:
-
-```bash
-docker compose restart stock-service
-```
-
-После рестарта в логах появится `publisher connected to RabbitMQ exchange=warehouse.exchange`, и stock.low будет публиковаться. Повторить шаг 3 сценария защиты на новом aggregateId / warehouseId.
+б) Publisher stock-service не успел подключиться к RabbitMQ на первом старте (в логах видно `publish skipped (reconnecting)` и `publisher reconnect attempt N`). На холодном `docker compose up -d --build` RabbitMQ становится healthy позже stock-service, и initial `connect()` падает с ECONNREFUSED. Сервис сам перезапускает publisher через `schedulePublisherReconnect` с экспоненциальным backoff (1s → 2s → 4s → 8s → 16s, до 5 попыток) — подождать до 30 секунд и проверить логи: должна появиться строка `publisher reconnected` и `publisher connected to RabbitMQ exchange=warehouse.exchange`. Если все 5 попыток исчерпаны (в логах `publisher giving up reconnect attempts`), тогда восстановление вручную: `docker compose restart stock-service`.
 
 **5. Grafana показывает «No data».**
 Дашборды смотрят на Prometheus как datasource — убедиться, что в `http://localhost:9090/targets` все три target'а в состоянии UP. Если нет — `docker compose restart prometheus`. Если есть, но в Grafana пусто: метрики появляются только после первого вызова соответствующего endpoint'а (сначала сходить curl'ом, потом смотреть Grafana).

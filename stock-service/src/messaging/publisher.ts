@@ -28,7 +28,7 @@ let reconnectTimer: NodeJS.Timeout | null = null;
 // зовут эту функцию при broker restart, но реальный setTimeout запускается
 // один - reconnectTimer guard. без этого создавались параллельные timer'ы,
 // два connect() в гонке, leaked listeners.
-function schedulePublisherReconnect(): void {
+export function schedulePublisherReconnect(): void {
   if (intentionallyClosed) return;
   if (reconnectTimer) return;
   if (reconnectAttempt >= MAX_RECONNECT_ATTEMPTS) {

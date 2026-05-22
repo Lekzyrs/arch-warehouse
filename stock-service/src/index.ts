@@ -4,6 +4,7 @@ import { initSchema } from "./config/db";
 import {
   closePublisher,
   connect as connectPublisher,
+  schedulePublisherReconnect,
 } from "./messaging/publisher";
 import { registry } from "./metrics/registry";
 import { openapiSpec } from "./openapi";
@@ -21,6 +22,8 @@ async function bootstrap() {
 
   // best-effort: publisher падает - сервис всё равно поднимается, projection
   // через try/catch не уронит запрос. low-stock alert просто молча не уйдёт.
+  // если первый connect упал, listener'ы 'error'/'close' ещё не висят, поэтому
+  // расписание реконнекта вешаем руками - иначе publisher остаётся мёртвым.
   try {
     await connectPublisher();
   } catch (e) {
@@ -28,6 +31,7 @@ async function bootstrap() {
       "[stock-service] RabbitMQ publisher connection failed (non-fatal):",
       e,
     );
+    schedulePublisherReconnect();
   }
 
   // graceful shutdown - даём publisher закрыть канал и connection
