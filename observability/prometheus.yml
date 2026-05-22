@@ -2,7 +2,8 @@
 # все таргеты используют compose-DNS имена сервисов (P13).
 # три app-сервиса экспонируют метрики на /actuator/prometheus,
 # rabbitmq - на /metrics (плагин rabbitmq_prometheus, порт 15692).
-# forward reference alert_rules.yml - правила и volume mount появятся в 06-04.
+# alert_rules.yml монтируется в /etc/prometheus/alert_rules.yml из docker-compose.
+# alertmanager - compose-DNS имя, порт 9093 (default).
 global:
   scrape_interval: 15s
   scrape_timeout: 10s
@@ -10,6 +11,11 @@ global:
 
 rule_files:
   - /etc/prometheus/alert_rules.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
 
 scrape_configs:
   - job_name: "product-service"
