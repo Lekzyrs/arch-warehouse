@@ -1,8 +1,13 @@
 import { Router, type Request, type Response } from "express";
 import { pool } from "../config/db";
+import { loadAggregate } from "../domain/stockAggregate";
+import type { StockAggregateState } from "../domain/eventSchemas";
 import {
   type AggregateRow,
+  type DetailEventRow,
   type RecentEventRow,
+  type SnapshotRow,
+  renderAggregatePage,
   renderDashboard,
 } from "../views/dashboard.html";
 
@@ -26,6 +31,22 @@ const RECENT_EVENTS_SQL = `
   FROM events
   ORDER BY occurred_at DESC
   LIMIT 20
+`;
+
+// per-aggregate event stream (detail page). $1 = aggregate_id
+const AGGREGATE_EVENTS_SQL = `
+  SELECT version, event_type, payload, occurred_at
+  FROM events
+  WHERE aggregate_id = $1
+  ORDER BY version ASC
+`;
+
+// per-aggregate snapshots (detail page). $1 = aggregate_id, новые сверху
+const AGGREGATE_SNAPSHOTS_SQL = `
+  SELECT version, state, created_at
+  FROM snapshots
+  WHERE aggregate_id = $1
+  ORDER BY version DESC
 `;
 
 export const dashboardRouter = Router();
@@ -65,3 +86,74 @@ dashboardRouter.get("/", async (_req: Request, res: Response) => {
       .send("<h1>Dashboard error</h1><pre>" + String(err) + "</pre>");
   }
 });
+
+// GET /dashboard/aggregate/:id - detail страница: event stream + snapshots +
+// текущий folded state. путь /aggregate/:id, потому что anchor href из index
+// уже указывает на /dashboard/aggregate/${id} (см. renderAggregateRow).
+// non-existent id - 200 c empty-state, не 404 и не 500.
+dashboardRouter.get(
+  "/aggregate/:id",
+  async (req: Request, res: Response) => {
+    const aggregateId = req.params.id;
+    try {
+      // параметризованные SELECT - $1 = aggregateId, никакой интерполяции
+      const eventsResult = await pool.query<DetailEventRow>(
+        AGGREGATE_EVENTS_SQL,
+        [aggregateId],
+      );
+      const snapshotsResult = await pool.query<SnapshotRow>(
+        AGGREGATE_SNAPSHOTS_SQL,
+        [aggregateId],
+      );
+
+      const events: DetailEventRow[] = eventsResult.rows.map((row) => ({
+        version: Number(row.version),
+        event_type: row.event_type,
+        payload: row.payload,
+        occurred_at: row.occurred_at,
+      }));
+
+      const snapshots: SnapshotRow[] = snapshotsResult.rows.map((row) => ({
+        version: Number(row.version),
+        state: row.state,
+        created_at: row.created_at,
+      }));
+
+      // loadAggregate использует snapshot fast-path + tail events.
+      // если падает - не валим страницу, рендерим empty-state folded
+      let foldedState: StockAggregateState | null = null;
+      try {
+        const loaded = await loadAggregate(aggregateId);
+        // version=0 + ноль событий = агрегат не существует, state не показываем
+        if (loaded.state.version === 0 && events.length === 0) {
+          foldedState = null;
+        } else {
+          foldedState = loaded.state;
+        }
+      } catch (err) {
+        console.log(
+          "[stock-service] loadAggregate error for " + aggregateId + ":",
+          err,
+        );
+        foldedState = null;
+      }
+
+      const html = renderAggregatePage(
+        aggregateId,
+        events,
+        snapshots,
+        foldedState,
+      );
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      res.status(200).send(html);
+    } catch (err) {
+      console.log(
+        "[stock-service] dashboard aggregate error for " + aggregateId + ":",
+        err,
+      );
+      res
+        .status(500)
+        .send("<h1>Aggregate page error</h1><pre>" + String(err) + "</pre>");
+    }
+  },
+);
