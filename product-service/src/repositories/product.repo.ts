@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { pool } from "../config/db";
 import { redis } from "../config/redis";
-import { cacheRequestsTotal } from "../metrics/registry";
+import { cacheRequestsCounter } from "../metrics/registry";
 import type {
   CreateProductDto,
   Product,
@@ -20,12 +20,12 @@ export async function findById(id: string): Promise<Product | null> {
   // read-through cache-aside: get → hit или miss → DB → set
   const cached = await redis.get(cacheKey(id));
   if (cached) {
-    cacheRequestsTotal.inc({ result: "hit" });
+    cacheRequestsCounter.inc({ result: "hit" });
     console.log("[product-service] cache hit");
     return JSON.parse(cached) as Product;
   }
 
-  cacheRequestsTotal.inc({ result: "miss" });
+  cacheRequestsCounter.inc({ result: "miss" });
   console.log("[product-service] cache miss");
 
   const { rows } = await pool.query<Product>(

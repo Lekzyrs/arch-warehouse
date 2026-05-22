@@ -4,7 +4,6 @@ import {
   type Request,
   type Response,
 } from "express";
-import { Counter } from "prom-client";
 import { z } from "zod";
 import { ConflictError, DomainError } from "../domain/errors";
 import {
@@ -21,7 +20,7 @@ import {
   decide,
   loadAggregate,
 } from "../domain/stockAggregate";
-import { registry } from "../metrics/registry";
+import { stockCommandsCounter } from "../metrics/registry";
 import { applyEventToReadModel } from "../read/projector";
 
 // command DTO. aggregateId = одна aggregate-stream на пару product+warehouse
@@ -85,13 +84,9 @@ const CommitReservationCommandSchema = z.object({
   performedBy: z.string().optional(),
 });
 
-// module-level Counter. duplicate-registration ошибка если создавать в обработчике
-const commandsTotal = new Counter({
-  name: "stock_commands_total",
-  help: "Total stock commands processed",
-  labelNames: ["command_type", "result"],
-  registers: [registry],
-});
+// stock_commands_total Counter определён в metrics/registry.ts как module-level
+// singleton (stockCommandsCounter). здесь только инкрементируем - имя метрики
+// и набор labels пришли из shared-contracts METRIC_NAMES.
 
 export const commandsRouter = Router();
 
@@ -119,7 +114,7 @@ commandsRouter.post(
       decide(state, { type: "STOCK_IN", ...cmd });
     } catch (err) {
       if (err instanceof DomainError) {
-        commandsTotal.inc({ command_type: "STOCK_IN", result: "rejected" });
+        stockCommandsCounter.inc({ command_type: "STOCK_IN", result: "rejected" });
         return res.status(422).json({ error: err.message });
       }
       throw err;
@@ -149,7 +144,7 @@ commandsRouter.post(
         console.error("[stock-service] projection failed for event:", e);
         throw e;
       }
-      commandsTotal.inc({ command_type: "STOCK_IN", result: "success" });
+      stockCommandsCounter.inc({ command_type: "STOCK_IN", result: "success" });
       console.log(
         `[stock-service] STOCK_IN aggregate=${cmd.aggregateId} v=${appended[0].version}`,
       );
@@ -161,7 +156,7 @@ commandsRouter.post(
       });
     } catch (err) {
       if (err instanceof ConflictError) {
-        commandsTotal.inc({ command_type: "STOCK_IN", result: "conflict" });
+        stockCommandsCounter.inc({ command_type: "STOCK_IN", result: "conflict" });
         return res.status(409).json({ error: err.message });
       }
       throw err;
@@ -184,7 +179,7 @@ commandsRouter.post(
       decide(state, { type: "STOCK_OUT", quantity: cmd.quantity });
     } catch (err) {
       if (err instanceof DomainError) {
-        commandsTotal.inc({ command_type: "STOCK_OUT", result: "rejected" });
+        stockCommandsCounter.inc({ command_type: "STOCK_OUT", result: "rejected" });
         return res.status(422).json({ error: err.message });
       }
       throw err;
@@ -213,7 +208,7 @@ commandsRouter.post(
         console.error("[stock-service] projection failed for event:", e);
         throw e;
       }
-      commandsTotal.inc({ command_type: "STOCK_OUT", result: "success" });
+      stockCommandsCounter.inc({ command_type: "STOCK_OUT", result: "success" });
       console.log(
         `[stock-service] STOCK_OUT aggregate=${cmd.aggregateId} v=${appended[0].version}`,
       );
@@ -225,7 +220,7 @@ commandsRouter.post(
       });
     } catch (err) {
       if (err instanceof ConflictError) {
-        commandsTotal.inc({ command_type: "STOCK_OUT", result: "conflict" });
+        stockCommandsCounter.inc({ command_type: "STOCK_OUT", result: "conflict" });
         return res.status(409).json({ error: err.message });
       }
       throw err;
@@ -252,7 +247,7 @@ commandsRouter.post(
       });
     } catch (err) {
       if (err instanceof DomainError) {
-        commandsTotal.inc({ command_type: "ADJUSTMENT", result: "rejected" });
+        stockCommandsCounter.inc({ command_type: "ADJUSTMENT", result: "rejected" });
         return res.status(422).json({ error: err.message });
       }
       throw err;
@@ -282,7 +277,7 @@ commandsRouter.post(
         console.error("[stock-service] projection failed for event:", e);
         throw e;
       }
-      commandsTotal.inc({ command_type: "ADJUSTMENT", result: "success" });
+      stockCommandsCounter.inc({ command_type: "ADJUSTMENT", result: "success" });
       console.log(
         `[stock-service] ADJUSTMENT aggregate=${cmd.aggregateId} reason=${cmd.reason_code} v=${appended[0].version}`,
       );
@@ -294,7 +289,7 @@ commandsRouter.post(
       });
     } catch (err) {
       if (err instanceof ConflictError) {
-        commandsTotal.inc({ command_type: "ADJUSTMENT", result: "conflict" });
+        stockCommandsCounter.inc({ command_type: "ADJUSTMENT", result: "conflict" });
         return res.status(409).json({ error: err.message });
       }
       throw err;
@@ -322,7 +317,7 @@ commandsRouter.post(
       });
     } catch (err) {
       if (err instanceof DomainError) {
-        commandsTotal.inc({ command_type: "RESERVE", result: "rejected" });
+        stockCommandsCounter.inc({ command_type: "RESERVE", result: "rejected" });
         return res.status(422).json({ error: err.message });
       }
       throw err;
@@ -352,7 +347,7 @@ commandsRouter.post(
         console.error("[stock-service] projection failed for event:", e);
         throw e;
       }
-      commandsTotal.inc({ command_type: "RESERVE", result: "success" });
+      stockCommandsCounter.inc({ command_type: "RESERVE", result: "success" });
       console.log(
         `[stock-service] RESERVE aggregate=${cmd.aggregateId} res=${cmd.reservationId} v=${appended[0].version}`,
       );
@@ -364,7 +359,7 @@ commandsRouter.post(
       });
     } catch (err) {
       if (err instanceof ConflictError) {
-        commandsTotal.inc({ command_type: "RESERVE", result: "conflict" });
+        stockCommandsCounter.inc({ command_type: "RESERVE", result: "conflict" });
         return res.status(409).json({ error: err.message });
       }
       throw err;
@@ -392,7 +387,7 @@ commandsRouter.post(
       });
     } catch (err) {
       if (err instanceof DomainError) {
-        commandsTotal.inc({ command_type: "RELEASE", result: "rejected" });
+        stockCommandsCounter.inc({ command_type: "RELEASE", result: "rejected" });
         return res.status(422).json({ error: err.message });
       }
       throw err;
@@ -422,7 +417,7 @@ commandsRouter.post(
         console.error("[stock-service] projection failed for event:", e);
         throw e;
       }
-      commandsTotal.inc({ command_type: "RELEASE", result: "success" });
+      stockCommandsCounter.inc({ command_type: "RELEASE", result: "success" });
       console.log(
         `[stock-service] RELEASE aggregate=${cmd.aggregateId} res=${cmd.reservationId} v=${appended[0].version}`,
       );
@@ -434,7 +429,7 @@ commandsRouter.post(
       });
     } catch (err) {
       if (err instanceof ConflictError) {
-        commandsTotal.inc({ command_type: "RELEASE", result: "conflict" });
+        stockCommandsCounter.inc({ command_type: "RELEASE", result: "conflict" });
         return res.status(409).json({ error: err.message });
       }
       throw err;
@@ -462,7 +457,7 @@ commandsRouter.post(
       });
     } catch (err) {
       if (err instanceof DomainError) {
-        commandsTotal.inc({
+        stockCommandsCounter.inc({
           command_type: "COMMIT_RESERVATION",
           result: "rejected",
         });
@@ -495,7 +490,7 @@ commandsRouter.post(
         console.error("[stock-service] projection failed for event:", e);
         throw e;
       }
-      commandsTotal.inc({
+      stockCommandsCounter.inc({
         command_type: "COMMIT_RESERVATION",
         result: "success",
       });
@@ -510,7 +505,7 @@ commandsRouter.post(
       });
     } catch (err) {
       if (err instanceof ConflictError) {
-        commandsTotal.inc({
+        stockCommandsCounter.inc({
           command_type: "COMMIT_RESERVATION",
           result: "conflict",
         });
