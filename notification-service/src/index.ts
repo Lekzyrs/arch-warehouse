@@ -19,12 +19,14 @@ async function bootstrap() {
     res.end(await registry.metrics());
   });
 
-  // swagger UI и raw openapi json. HTTP surface минимальный, но рубрика DOC-01
-  // требует /docs на всех HTTP-сервисах
-  app.use("/docs", swaggerUi.serve, swaggerUi.setup(openapiSpec));
+  // raw openapi json: регистрируется ДО swaggerUi.serve, иначе swagger-ui
+  // middleware на /docs/* перехватит /docs/json и вернёт HTML
   app.get("/docs/json", (_req: Request, res: Response) =>
     res.json(openapiSpec),
   );
+  // swagger UI на /docs. HTTP surface минимальный, но рубрика DOC-01 требует
+  // /docs на всех HTTP-сервисах
+  app.use("/docs", swaggerUi.serve, swaggerUi.setup(openapiSpec));
   console.log(`[notification-service] Swagger UI: http://localhost:${PORT}/docs`);
 
   app.listen(PORT, () =>

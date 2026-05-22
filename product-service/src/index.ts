@@ -28,11 +28,12 @@ async function bootstrap() {
   });
 
   app.use("/products", productsRouter);
-  app.use("/docs", swaggerUi.serve, swaggerUi.setup(openapiSpec));
-  // raw openapi json: machine-readable выдача для examiner/инструментов
+  // raw openapi json: регистрируется ДО swaggerUi.serve, иначе swagger-ui
+  // middleware на /docs/* перехватит /docs/json и вернёт HTML
   app.get("/docs/json", (_req: Request, res: Response) =>
     res.json(openapiSpec),
   );
+  app.use("/docs", swaggerUi.serve, swaggerUi.setup(openapiSpec));
   console.log(`[product-service] Swagger UI: http://localhost:${PORT}/docs`);
 
   app.listen(PORT, () =>

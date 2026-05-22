@@ -65,13 +65,13 @@ async function bootstrap() {
   app.use("/dashboard", dashboardRouter);
   console.log("[stock-service] Dashboard routes registered at /dashboard");
 
-  // swagger UI и raw openapi json. монтируем ПОСЛЕ всех бизнес-роутов
-  // но до listen - порядок относительно остальных app.use не критичен,
-  // путь /docs не пересекается с /stock|/admin|/dashboard.
-  app.use("/docs", swaggerUi.serve, swaggerUi.setup(openapiSpec));
+  // raw openapi json: регистрируется ДО swaggerUi.serve, иначе swagger-ui
+  // middleware на /docs/* перехватит /docs/json и вернёт HTML
   app.get("/docs/json", (_req: Request, res: Response) =>
     res.json(openapiSpec),
   );
+  // swagger UI на /docs. путь /docs не пересекается с /stock|/admin|/dashboard.
+  app.use("/docs", swaggerUi.serve, swaggerUi.setup(openapiSpec));
   console.log(`[stock-service] Swagger UI: http://localhost:${PORT}/docs`);
 
   app.listen(PORT, () =>
