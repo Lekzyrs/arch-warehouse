@@ -1,348 +1,258 @@
-# Курсовая работа: Складской учёт (микросервисы)
+# Складской учёт - микросервисы на TypeScript
 
-Контейнеризованное микросервисное приложение складского учёта. Три HTTP-сервиса на TypeScript / Node.js поверх PostgreSQL, Redis и RabbitMQ:
+Контейнеризованное микросервисное приложение для учёта складских остатков. Три HTTP-сервиса на TypeScript / Node.js поверх PostgreSQL, Redis и RabbitMQ, с полным observability-стеком (Prometheus, Grafana, Alertmanager).
 
-- **product-service** (порт 8080) — каталог товаров (REST CRUD) с cache-aside поверх Redis.
-- **stock-service** (порт 8081) — учёт остатков, CQRS + Event Sourcing. Команды пишут события в append-only лог `events`, проектор синхронно строит read model `stock_balances` / `stock_movement`. На пересечении порога публикует `stock.low` в RabbitMQ.
-- **notification-service** (порт 8082) — consumer `stock.low`, пишет alert в лог и отправляет письмо через Mailpit.
+Проект демонстрирует базовые архитектурные шаблоны: cache-aside, event-driven architecture, CQRS, Event Sourcing, observability. Поднимается одной командой `docker compose up -d --build`.
 
-Курсовая работа по предмету «Архитектурирование» (МИСИС). Цель — оценка 5: ≥3 контейнерных сервиса, кеширование, межсервисное взаимодействие через брокер, мониторинг всех трёх сервисов, CQRS и Event Sourcing — всё демонстрируется одной командой `docker compose up -d --build`.
+## Содержание
+
+- [Стек](#стек)
+- [Сервисы](#сервисы)
+- [Архитектура](#архитектура)
+- [Быстрый старт](#быстрый-старт)
+- [Endpoints](#endpoints)
+- [API и Swagger UI](#api-и-swagger-ui)
+- [Архитектурные паттерны](#архитектурные-паттерны)
+- [Конфигурация](#конфигурация)
+- [Структура проекта](#структура-проекта)
+- [Разработка](#разработка)
+- [Troubleshooting](#troubleshooting)
+
+## Стек
+
+| Слой                | Технология                                 |
+| ------------------- | ------------------------------------------ |
+| Язык                | TypeScript 5, Node.js 20                   |
+| HTTP                | Express 4                                  |
+| Валидация / OpenAPI | zod 4 + `@asteasolutions/zod-to-openapi`   |
+| БД                  | PostgreSQL 16 (`pg`, без ORM)              |
+| Кеш                 | Redis 7 (`ioredis`)                        |
+| Брокер              | RabbitMQ 3.13 (`amqplib`)                  |
+| Метрики             | `prom-client`                              |
+| Observability       | Prometheus, Grafana, Alertmanager, Mailpit |
+| Контейнеризация     | Docker, docker-compose v2                  |
+
+## Сервисы
+
+| Сервис               | Порт | Назначение                                                              |
+| -------------------- | ---- | ----------------------------------------------------------------------- |
+| product-service      | 8080 | Каталог товаров, REST CRUD с cache-aside поверх Redis                   |
+| stock-service        | 8081 | Учёт остатков, CQRS + Event Sourcing, публикация `stock.low` в RabbitMQ |
+| notification-service | 8082 | Consumer `stock.low`, лог + SMTP-уведомление в Mailpit                  |
+
+## Архитектура
+
+**App tier** (3 сервиса): product-service, stock-service, notification-service.
+
+**Infra tier** (7 сервисов): postgres (две БД: `product_db` и `stock_db`), redis, rabbitmq, prometheus, grafana, alertmanager, mailpit.
+
+Потоки данных:
+
+- **product-service → redis (cache-aside):** на `GET /products/:id` проверяется ключ; при miss идёт SELECT в `product_db` и значение кладётся в кеш; на `POST/PUT/DELETE` ключ инвалидируется.
+- **stock-service → postgres → rabbitmq:** команды пишут события в append-only лог `stock_db.events`, синхронный проектор обновляет read model `stock_balances` / `stock_movement`; при пересечении порога публикуется `stock.low` в exchange `warehouse.exchange`.
+- **rabbitmq → notification-service:** consumer на durable-очереди `stock.low.notifications` пишет лог-строку и шлёт письмо через SMTP в Mailpit; невалидные сообщения уходят в DLX (`warehouse.dlx` → `stock.low.dlq`).
+- **Все три сервиса → `/actuator/prometheus`:** Prometheus скрейпит с интервалом 15s, Grafana строит дашборды, Alertmanager шлёт оповещения в Mailpit.
 
 ## Быстрый старт
+
+Требования: Docker (Engine 24+), Docker Compose v2.
 
 ```bash
 git clone <repo-url>
 cd archfinal
+cp .env.example .env       # при желании отредактировать пароли / порты
 docker compose up -d --build
-sleep 45
 ```
 
-Подождать ~30-45 секунд (контейнеры стартуют через `depends_on: condition: service_healthy`). Если RabbitMQ становится healthy позже stock-service на холодном `up --build`, publisher сам перепoдключится по экспоненциальному backoff (1s → 2s → 4s → 8s → 16s, до 5 попыток) — никакого ручного restart не нужно. После этого все endpoint'ы доступны:
+Подождать ~30-45 секунд (старт сервисов синхронизирован через `depends_on: condition: service_healthy`). После этого все endpoint'ы доступны.
 
-| Что                                  | URL                              |
-| ------------------------------------ | -------------------------------- |
-| product-service health               | http://localhost:8080/health     |
-| stock-service health                 | http://localhost:8081/health     |
-| notification-service health          | http://localhost:8082/health     |
-| product-service Swagger UI           | http://localhost:8080/docs       |
-| stock-service Swagger UI             | http://localhost:8081/docs       |
-| notification-service Swagger UI      | http://localhost:8082/docs       |
-| stock-service event store dashboard  | http://localhost:8081/dashboard  |
-| Prometheus (targets)                 | http://localhost:9090/targets    |
-| Grafana (admin / admin)              | http://localhost:3000            |
-| Alertmanager                         | http://localhost:9093            |
-| Mailpit (UI для писем от Alertmanager) | http://localhost:8025          |
-| RabbitMQ management (guest / guest)  | http://localhost:15672           |
-
-## Архитектура
-
-Контейнеры:
-
-- **App tier (3):** product-service, stock-service, notification-service.
-- **Infra tier (7):** postgres (две БД: `product_db` и `stock_db`), redis, rabbitmq, prometheus, grafana, alertmanager, mailpit.
-
-Потоки данных:
-
-- product-service → redis (cache-aside): при `GET /products/:id` проверяется ключ, на miss идёт SELECT в `product_db`, после чего значение кладётся в кеш; на любой `POST/PUT/DELETE` ключ инвалидируется.
-- stock-service → postgres (`stock_db.events`, append-only) → projector → `stock_balances` / `stock_movement` (read model) → RabbitMQ exchange `stock.events` с routing key `stock.low` (когда `available` пересекает `LOW_STOCK_THRESHOLD`).
-- RabbitMQ → notification-service (consumer на очереди `stock.low.notifications`) → лог + SMTP в Mailpit.
-- Все три сервиса → `/actuator/prometheus` → Prometheus (scrape 15s) → Grafana (дашборды) + Alertmanager → Mailpit.
-
-## Сценарий защиты
-
-Этот раздел — точный сценарий ответа преподавателю. Каждый шаг отвечает на один пункт критериев (R1-R6), содержит точную команду и ожидаемый результат на экране. Если все шаги отрабатывают так, как написано, оценка 5 защищаема без импровизации.
-
-Подготовка перед началом (один раз):
+Остановка:
 
 ```bash
-docker compose down -v
-docker compose up -d --build
-sleep 45
-docker compose ps
+docker compose down            # сохранить volumes
+docker compose down -v         # с очисткой данных
 ```
 
-Все десять контейнеров должны быть в состоянии `Up` (и `healthy` там, где есть healthcheck). В логах stock-service видна строка `publisher connected to RabbitMQ exchange=warehouse.exchange` — если RabbitMQ стал healthy после stock-service, publisher автоматически переподключается за 1-16 секунд (без ручного restart).
+## Endpoints
 
-### Шаг 1 - R1: ≥3 контейнерных сервиса, единый `docker compose up`
+| Сервис / UI                         | URL                             |
+| ----------------------------------- | ------------------------------- |
+| product-service health              | http://localhost:8080/health    |
+| stock-service health                | http://localhost:8081/health    |
+| notification-service health         | http://localhost:8082/health    |
+| product-service Swagger UI          | http://localhost:8080/docs      |
+| stock-service Swagger UI            | http://localhost:8081/docs      |
+| notification-service Swagger UI     | http://localhost:8082/docs      |
+| Event store dashboard               | http://localhost:8081/dashboard |
+| Prometheus                          | http://localhost:9090/targets   |
+| Grafana (admin / admin)             | http://localhost:3000           |
+| Alertmanager                        | http://localhost:9093           |
+| Mailpit                             | http://localhost:8025           |
+| RabbitMQ management (guest / guest) | http://localhost:15672          |
+
+## API и Swagger UI
+
+OpenAPI 3.0 + Swagger UI смонтированы на каждом HTTP-сервисе:
+
+| Сервис               | Swagger UI                 | OpenAPI JSON                    |
+| -------------------- | -------------------------- | ------------------------------- |
+| product-service      | http://localhost:8080/docs | http://localhost:8080/docs/json |
+| stock-service        | http://localhost:8081/docs | http://localhost:8081/docs/json |
+| notification-service | http://localhost:8082/docs | http://localhost:8082/docs/json |
+
+Документация генерируется из тех же zod-схем, которые валидируют входящие запросы (`@asteasolutions/zod-to-openapi`). Единый source of truth: невозможно «разъехаться» валидации и контракта, потому что одна и та же `z.object(...)` описывает обе стороны.
+
+## Архитектурные паттерны
+
+### Cache-aside (product-service)
+
+При `GET /products/:id`:
+
+1. Проверка ключа в Redis. На hit - вернуть значение, инкремент `cache_requests_total{result="hit"}`.
+2. На miss - SELECT в Postgres, положить в Redis с TTL, инкремент `cache_requests_total{result="miss"}`.
+
+На `POST / PUT / DELETE` ключ удаляется явно (`DEL`), без write-through. Это сохраняет инвариант «кеш не содержит устаревших данных» без необходимости синхронной записи в обе стороны.
+
+### Event Sourcing (stock-service)
+
+Состояние агрегата хранится не как текущая запись, а как append-only лог событий в таблице `events`:
+
+```sql
+CREATE TABLE events (
+  aggregate_id TEXT NOT NULL,
+  version      INT  NOT NULL,
+  event_type   TEXT NOT NULL,
+  payload      JSONB NOT NULL,
+  occurred_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (aggregate_id, version)
+);
+```
+
+Поддерживаемые типы событий: `STOCK_IN`, `STOCK_OUT`, `ADJUSTMENT`, `RESERVED`, `RELEASED`, `COMMITTED`. Никаких UPDATE / DELETE - только INSERT.
+
+**Optimistic concurrency:** `UNIQUE(aggregate_id, version)` гарантирует, что параллельные команды на одном агрегате не запишут одну и ту же версию. Вторая транзакция получает HTTP 409, клиент повторяет команду после rehydrate.
+
+**Снапшоты:** каждые `SNAPSHOT_EVERY` событий (по умолчанию 50) записывается JSONB-снапшот в `snapshots`. При rehydrate агрегат загружается с последнего снапшота и доигрывает только хвост.
+
+**Корректировки:** ошибочные движения исправляются новым событием `ADJUSTMENT` с `quantity_delta` и `reason_code`, не UPDATE-ом по `events`. Audit trail сохраняется.
+
+**Replay:** read model восстанавливается из event log:
 
 ```bash
-docker compose ps
-curl -s http://localhost:8080/health
-curl -s http://localhost:8081/health
-curl -s http://localhost:8082/health
+curl -X POST http://localhost:8081/admin/replay \
+  -H "X-Admin-Key: <ADMIN_KEY>"
 ```
 
-Ожидаемый результат: `docker compose ps` показывает не менее десяти контейнеров (3 приложения + postgres + redis + rabbitmq + prometheus + grafana + alertmanager + mailpit); каждый `/health` возвращает `{"ok":true}`.
+### CQRS (stock-service)
 
-### Шаг 2 - R2: Кеширование (cache-aside поверх Redis)
+Физическое разделение моделей записи и чтения:
+
+- **Write side:** `POST /stock/commands/*` → aggregate → INSERT в `events` → синхронный проектор обновляет `stock_balances` / `stock_movement` в той же транзакции.
+- **Read side:** `GET /stock`, `GET /stock/movements`, `GET /stock/:productId/:warehouseId` читают **только** из read-модели. Никаких ad-hoc JOIN-ов по `events` из query-роутов.
+
+Команды и запросы зарегистрированы в разных Express router'ах (`commands.router.ts` и `query.router.ts`), физически расположены в разных файлах. Read model - производный артефакт, его можно полностью перестроить через `/admin/replay`.
+
+### Event-Driven Architecture (stock-service ↔ notification-service)
+
+При пересечении `LOW_STOCK_THRESHOLD` сверху вниз stock-service публикует событие в RabbitMQ:
+
+- **Exchange** `warehouse.exchange` (topic, durable)
+- **Routing key** `stock.low`
+- **Queue** `stock.low.notifications` (durable, с DLX-arguments)
+- **DLX** `warehouse.dlx` → `stock.low.dlq` для невалидных сообщений
+
+Notification-service потребляет очередь, на каждое валидное сообщение пишет лог-строку и шлёт письмо в Mailpit. Невалидный JSON уходит в DLQ через DLX, consumer **не** уходит в crash-loop.
+
+При холодном старте publisher умеет переподключаться: если RabbitMQ ещё не healthy, делается экспоненциальный backoff `1s → 2s → 4s → 8s → 16s` (до 5 попыток). Очередь и exchange объявляются durable, persistent-сообщения не теряются при перезапуске брокера.
+
+### Observability
+
+Каждый сервис экспортирует Prometheus-метрики на `/actuator/prometheus`:
+
+| Сервис               | Бизнес-метрики                                                                            |
+| -------------------- | ----------------------------------------------------------------------------------------- |
+| product-service      | `cache_requests_total{result="hit\|miss"}`                                                |
+| stock-service        | `stock_commands_total{command}`, `stock_events_published_total`, `projection_lag_seconds` |
+| notification-service | `stock_events_consumed_total{event_type}`, `low_stock_alerts_total`                       |
+
+Default-метрики Node.js (event loop lag, heap, CPU) добавляются автоматически через `collectDefaultMetrics()`.
+
+Prometheus скрейпит четыре target'а (3 сервиса + сам RabbitMQ через `rabbitmq_prometheus` plugin). Grafana provisioning подгружает три дашборда (по одному на сервис) при старте контейнера. Alertmanager роутит alert'ы по правилам из `observability/alert_rules.yml`; SMTP-приёмник - Mailpit для разработки.
+
+### Mini event-store dashboard
+
+`http://localhost:8081/dashboard` - server-rendered HTML (без клиентского framework'а):
+
+- `/dashboard` - список aggregate ID + лента последних 20 событий.
+- `/dashboard/aggregate/:id` - поток событий, снапшоты, текущее folded-state.
+- `/dashboard/replay` - GET показывает before-state и форму, POST триггерит rebuild read-модели и показывает before/after на одной странице.
+
+POST `/dashboard/replay` гарантирует HTTP 200 даже если projection-таблицы дропнуты (degraded-state с информативным сообщением). События остаются immutable: COUNT(\*) по `events` до и после replay одинаковый.
+
+## Конфигурация
+
+Вся конфигурация - через переменные окружения. См. `.env.example`. Основное:
+
+| Переменная                            | По умолчанию          | Назначение                                                |
+| ------------------------------------- | --------------------- | --------------------------------------------------------- |
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` | archuser / archpass   | Креды Postgres                                            |
+| `PRODUCT_DB_NAME` / `STOCK_DB_NAME`   | product_db / stock_db | Имена per-service БД                                      |
+| `REDIS_HOST` / `REDIS_PORT`           | redis / 6379          | Подключение к Redis                                       |
+| `RABBITMQ_HOST` / `RABBITMQ_PORT`     | rabbitmq / 5672       | AMQP                                                      |
+| `RABBITMQ_USER` / `RABBITMQ_PASS`     | guest / guest         | RabbitMQ креды                                            |
+| `PRODUCT_SERVICE_PORT`                | 8080                  | Внешний порт product-service                              |
+| `STOCK_SERVICE_PORT`                  | 8081                  | Внешний порт stock-service                                |
+| `NOTIFICATION_SERVICE_PORT`           | 8082                  | Внешний порт notification-service                         |
+| `LOW_STOCK_THRESHOLD`                 | 10                    | Порог публикации `stock.low`                              |
+| `SNAPSHOT_EVERY`                      | 50                    | Через сколько событий записывать снапшот                  |
+| `ADMIN_KEY`                           | changeme              | Защита `POST /admin/replay` через заголовок `X-Admin-Key` |
+| `GF_SECURITY_ADMIN_PASSWORD`          | admin                 | Пароль Grafana admin                                      |
+
+Перед публичным деплоем поменять как минимум `POSTGRES_PASSWORD`, `RABBITMQ_PASS`, `ADMIN_KEY` и `GF_SECURITY_ADMIN_PASSWORD`. `.env` в репозиторий не коммитится (см. `.gitignore`).
+
+## Разработка
+
+Локальный запуск сервиса (без Docker, для отладки):
 
 ```bash
-# создаём товар
-PRODUCT_ID=$(curl -s -X POST http://localhost:8080/products \
-  -H "Content-Type: application/json" \
-  -d '{"sku":"DEMO-001","name":"Тестовый товар","unit":"шт","category":"demo"}' \
-  | sed -E 's/.*"id":"([^"]+)".*/\1/')
-echo "PRODUCT_ID=$PRODUCT_ID"
-
-# первый GET - cache miss (читает из Postgres, кладёт в Redis)
-curl -s "http://localhost:8080/products/$PRODUCT_ID" >/dev/null
-
-# второй GET - cache hit (читает из Redis)
-curl -s "http://localhost:8080/products/$PRODUCT_ID" >/dev/null
-
-# смотрим логи
-docker compose logs product-service --tail=20 | grep "cache"
+cd <service>                # product-service / stock-service / notification-service
+npm ci
+npm run dev                 # tsx watch src/index.ts
 ```
 
-Ожидаемый результат: в логе видно сначала строку `[product-service] cache miss`, потом `[product-service] cache hit`. Это и есть cache-aside: первый запрос промахивается, второй уже из кеша.
-
-Дополнительно (счётчик в Prometheus):
+Type-check и production-сборка:
 
 ```bash
-curl -s http://localhost:8080/actuator/prometheus | grep "cache_requests_total"
+npm run build               # tsc -> dist/
+npm start                   # node dist/index.js
 ```
 
-Должны быть две серии: `cache_requests_total{result="hit"}` и `cache_requests_total{result="miss"}` с ненулевыми значениями.
-
-### Шаг 3 - R3: Брокер (RabbitMQ, межсервисное взаимодействие)
-
-Цель — провести остаток ниже `LOW_STOCK_THRESHOLD=10`, увидеть, как stock-service публикует `stock.low`, а notification-service это сообщение принимает.
+EDA smoke-test (durability при restart RabbitMQ):
 
 ```bash
-# фиксированный aggregateId, чтобы все команды попали в одну стрим-историю
-AGG=demo-prod-001-wh1
-
-# 1) приход на склад 12 единиц
-curl -s -X POST http://localhost:8081/stock/commands/stock-in \
-  -H "Content-Type: application/json" \
-  -d "{\"aggregateId\":\"$AGG\",\"productId\":\"$PRODUCT_ID\",\"warehouseId\":\"WH1\",\"quantity\":12}"
-
-# 2) расход 5 - остаток 7, ниже порога 10
-curl -s -X POST http://localhost:8081/stock/commands/stock-out \
-  -H "Content-Type: application/json" \
-  -d "{\"aggregateId\":\"$AGG\",\"productId\":\"$PRODUCT_ID\",\"warehouseId\":\"WH1\",\"quantity\":5}"
-
-# проверяем логи stock-service - должна быть строка "low stock detected"
-docker compose logs stock-service --tail=20 | grep "low stock"
-
-# проверяем логи notification-service - должна быть строка "LOW STOCK"
-docker compose logs notification-service --tail=20 | grep "LOW STOCK"
-```
-
-Ожидаемый результат:
-
-- в логе stock-service: `[stock-service] low stock detected productId=... available=7 threshold=10`
-- в логе notification-service: `[notification-service] LOW STOCK productId=... warehouseId=WH1 available=7 threshold=10`
-
-Дополнительно — Mailpit (письмо ушло):
-
-Открыть в браузере http://localhost:8025 — во входящих лежит письмо «LOW STOCK» с информацией о товаре. Это полный путь EDA: stock-service → RabbitMQ → notification-service → SMTP → Mailpit.
-
-Дополнительно — RabbitMQ management UI:
-
-Открыть http://localhost:15672 (guest / guest) → Exchanges → `stock.events`. Видно очередь `stock.low.notifications`, привязанную к routing key `stock.low`.
-
-### Шаг 4 - R4: Мониторинг всех трёх сервисов
-
-В браузере: http://localhost:9090/targets — преподаватель видит активные target'ы со State=UP для product-service:8080, stock-service:8081, notification-service:8082 (плюс rabbitmq:15692 и prometheus сам себя).
-
-Метрики каждого сервиса доступны напрямую:
-
-```bash
-# product-service: cache hit/miss
-curl -s http://localhost:8080/actuator/prometheus | grep -E "^cache_requests_total"
-
-# stock-service: команды (stock_in / stock_out / adjustment / reserve / release / commit_reservation)
-# и публикации событий
-curl -s http://localhost:8081/actuator/prometheus | grep -E "^stock_commands_total|^stock_events_published_total"
-
-# notification-service: события потреблены и low-stock alerts отправлены
-curl -s http://localhost:8082/actuator/prometheus | grep -E "^stock_events_consumed_total|^low_stock_alerts_total"
-```
-
-Grafana: открыть http://localhost:3000 (admin / admin) → Dashboards. Provisioning подгружает три дашборда: product-service, stock-service, notification-service — на каждом видны панели с живыми данными по только что сгенерированным метрикам.
-
-Alertmanager: http://localhost:9093 — активные/недавние alert'ы (правила лежат в `observability/alert_rules.yml`, ловят, например, ошибки публикации и падение target'ов; письма приходят в Mailpit).
-
-### Шаг 5 - R5: CQRS (command / query разделены)
-
-Write side (команды идут на отдельный router, попадают в aggregate, аппендят события, синхронно обновляют read model):
-
-```bash
-curl -s -X POST http://localhost:8081/stock/commands/stock-in \
-  -H "Content-Type: application/json" \
-  -d "{\"aggregateId\":\"$AGG\",\"productId\":\"$PRODUCT_ID\",\"warehouseId\":\"WH1\",\"quantity\":3}"
-```
-
-Read side (отдельный router, ходит ТОЛЬКО в read model — `stock_balances` / `stock_movement`, никогда в `events`):
-
-```bash
-# текущий остаток по агрегату
-curl -s "http://localhost:8081/stock?productId=$PRODUCT_ID"
-
-# история движений (read model)
-curl -s "http://localhost:8081/stock/movements?productId=$PRODUCT_ID"
-```
-
-Показать преподавателю разделение по таблицам:
-
-```bash
-# write side - append-only лог событий (PK = (aggregate_id, version), нет суррогатного id)
-docker compose exec postgres psql -U archuser -d stock_db \
-  -c "SELECT aggregate_id, event_type, version, occurred_at FROM events ORDER BY occurred_at DESC LIMIT 5;"
-
-# read side - денормализованная проекция
-docker compose exec postgres psql -U archuser -d stock_db \
-  -c "SELECT product_id, warehouse_id, on_hand, reserved, available FROM stock_balances;"
-```
-
-Ожидаемый результат: `events` и `stock_balances` — две разные таблицы, обновлённые одной командой. Команда ходит в `events`, query — в `stock_balances`. Это и есть CQRS-разделение write/read моделей.
-
-Дополнительно — replay read-модели из event log (демонстрирует, что read model производный артефакт):
-
-```bash
-curl -s -X POST http://localhost:8081/admin/replay \
-  -H "X-Admin-Key: changeme"
-# {"ok":true,"message":"Read model rebuilt from event log"}
-```
-
-### Шаг 6 - R6: Event Sourcing
-
-```bash
-# несколько движений, чтобы было что показать
-curl -s -X POST http://localhost:8081/stock/commands/stock-in \
-  -H "Content-Type: application/json" \
-  -d "{\"aggregateId\":\"$AGG\",\"productId\":\"$PRODUCT_ID\",\"warehouseId\":\"WH1\",\"quantity\":5}"
-curl -s -X POST http://localhost:8081/stock/commands/stock-out \
-  -H "Content-Type: application/json" \
-  -d "{\"aggregateId\":\"$AGG\",\"productId\":\"$PRODUCT_ID\",\"warehouseId\":\"WH1\",\"quantity\":2}"
-
-# исправление ошибочной записи делается КОРРЕКТИРУЮЩИМ событием, не UPDATE
-curl -s -X POST http://localhost:8081/stock/commands/adjustment \
-  -H "Content-Type: application/json" \
-  -d "{\"aggregateId\":\"$AGG\",\"productId\":\"$PRODUCT_ID\",\"warehouseId\":\"WH1\",\"quantity_delta\":-1,\"reason_code\":\"DAMAGE\",\"notes\":\"тестовая корректировка\"}"
-
-# полный неизменяемый лог событий по агрегату
-docker compose exec postgres psql -U archuser -d stock_db -c \
-  "SELECT aggregate_id, version, event_type, occurred_at FROM events WHERE aggregate_id='$AGG' ORDER BY version;"
-```
-
-Ожидаемый результат: видно append-only лог с возрастающим `version` (1, 2, 3, ...), типы событий `STOCK_IN`, `STOCK_OUT`, `ADJUSTMENT`. Никаких UPDATE/DELETE в `events` нет — только INSERT.
-
-Снапшоты:
-
-```bash
-docker compose exec postgres psql -U archuser -d stock_db -c \
-  "SELECT aggregate_id, version, created_at FROM snapshots ORDER BY created_at DESC LIMIT 3;"
-```
-
-Если по агрегату накоплено ≥`SNAPSHOT_EVERY` событий (по умолчанию 3 в `.env`), будет запись снапшота — rehydrate агрегата начинается со снапшота и доигрывает только хвост.
-
-Optimistic concurrency:
-
-UNIQUE-индекс `(aggregate_id, version)` гарантирует, что параллельные команды на одном агрегате не записывают одну и ту же версию: вторая транзакция получит HTTP 409, клиент повторяет команду после перечитывания агрегата.
-
-Event store dashboard (HTML-страница самого stock-service):
-
-Открыть http://localhost:8081/dashboard — список агрегатов; клик по агрегату показывает его поток событий в хронологическом порядке. Это «лицо» Event Sourcing.
-
-## API и документация
-
-OpenAPI 3.0.0 + Swagger UI поднят на каждом сервисе:
-
-| Сервис               | Swagger UI                       | OpenAPI JSON                          |
-| -------------------- | -------------------------------- | ------------------------------------- |
-| product-service      | http://localhost:8080/docs       | http://localhost:8080/docs/json       |
-| stock-service        | http://localhost:8081/docs       | http://localhost:8081/docs/json       |
-| notification-service | http://localhost:8082/docs       | http://localhost:8082/docs/json       |
-
-Документация генерируется из тех же zod-схем, которые используются для валидации запросов (через `@asteasolutions/zod-to-openapi`). Это единый source of truth: схема не может разъехаться с реальным контрактом, потому что одна и та же `z.object(...)` валидирует запрос и описывает OpenAPI-операцию.
-
-## Вопросы и ответы
-
-**Q1: Зачем Event Sourcing в складской системе?**
-A1: Склад требует полного аудита: каждое движение товара должно быть неизменно зафиксировано. ES даёт append-only лог событий, из которого восстанавливается любое историческое состояние и объясняется любой текущий остаток.
-
-**Q2: Зачем CQRS?**
-A2: Команды (изменение состояния через события) и запросы (чтение денормализованной проекции) имеют разные нагрузочные и схемные требования. Разделение позволяет оптимизировать каждую сторону независимо и не смешивать инварианты агрегата с требованиями отображения.
-
-**Q3: Как система обрабатывает гонку при одновременных командах на одном агрегате?**
-A3: Оптимистическая конкурентность через `UNIQUE(aggregate_id, version)`: команда читает текущую версию агрегата, пишет событие с `version+1`; если другая транзакция успела раньше, INSERT нарушает уникальное ограничение → HTTP 409, клиент повторяет после перечитывания агрегата.
-
-**Q4: Как исправить ошибочную запись движения?**
-A4: Новым корректирующим событием (например, `ADJUSTMENT` с `reason_code=DAMAGE`), а не UPDATE/DELETE по `events`. События неизменны, audit trail сохраняется в полном виде.
-
-**Q5: Что произойдёт если notification-service упадёт и перезапустится?**
-A5: Очередь `stock.low.notifications` объявлена durable, сообщения персистированы на брокере. При перезапуске consumer возобновляет потребление с последнего unack'ed сообщения; невалидные сообщения уходят в DLX, а не в бесконечный requeue. Ничего не теряется.
-
-**Q6: Как проверить, что мониторинг работает для всех трёх сервисов?**
-A6: `http://localhost:9090/targets` показывает все три сервиса в состоянии UP; Grafana-дашборды отображают живые данные с каждого сервиса; `curl /actuator/prometheus` на каждом порту возвращает метрики Prometheus-формата с service-специфичными именами (`cache_requests_total`, `stock_commands_total`, `stock_events_consumed_total`, `low_stock_alerts_total`).
-
-## Структура проекта
-
-```
-archfinal/
-├── product-service/          # каталог товаров, cache-aside
-│   ├── src/
-│   │   ├── index.ts          # express bootstrap + /docs + /actuator/prometheus
-│   │   ├── routes/           # products.router.ts
-│   │   ├── repositories/     # product.repo.ts (cache-aside)
-│   │   ├── schemas/          # product.schema.ts (zod + OpenAPI)
-│   │   └── metrics/          # registry.ts (cache_requests_total)
-│   ├── Dockerfile
-│   └── package.json
-├── stock-service/            # CQRS + Event Sourcing
-│   ├── src/
-│   │   ├── index.ts
-│   │   ├── routes/           # commands.router.ts, query.router.ts, admin.router.ts, dashboard.router.ts
-│   │   ├── domain/           # stockAggregate.ts, eventSchemas.ts, errors.ts
-│   │   ├── read/             # projector.ts, readModels.ts
-│   │   ├── messaging/        # publisher.ts (stock.low → RabbitMQ)
-│   │   ├── openapi.ts        # 15 paths, 17 reusable schemas
-│   │   └── metrics/          # stock_commands_total, stock_events_published_total, projection_lag_seconds
-│   ├── Dockerfile
-│   └── package.json
-├── notification-service/     # consumer stock.low → SMTP
-│   ├── src/
-│   │   ├── index.ts
-│   │   ├── consumer.ts       # RabbitMQ consumer + DLX
-│   │   ├── email.ts          # SMTP в Mailpit
-│   │   ├── openapi.ts
-│   │   └── metrics/          # stock_events_consumed_total, low_stock_alerts_total
-│   ├── Dockerfile
-│   └── package.json
-├── shared-contracts/         # METRIC_NAMES, общие константы
-├── observability/
-│   ├── prometheus.yml        # scrape config
-│   ├── alert_rules.yml
-│   ├── alertmanager.yml      # SMTP в Mailpit
-│   ├── grafana/provisioning/ # datasource + 3 dashboards
-│   └── rabbitmq/enabled_plugins   # rabbitmq_prometheus
-├── infra/
-│   └── postgres-init.sql     # создаёт product_db и stock_db + DDL
-├── scripts/
-├── docker-compose.yml        # 10 контейнеров
-├── .env                      # пароли и порты (не коммитится)
-└── README.md
+bash stock-service/scripts/eda-smoke-test.sh
 ```
 
 ## Troubleshooting
 
-**1. Сервис застрял в состоянии `starting`.**
-Проверить логи: `docker compose logs <service> --tail=50`. Если видно `ECONNREFUSED`, скорее всего инфраструктура (postgres / rabbitmq) ещё не прошла healthcheck. Подождать 10-15 секунд: `depends_on: condition: service_healthy` сам поднимет приложение, когда зависимость станет healthy. В крайнем случае: `docker compose restart <service>`.
+**1. Сервис в состоянии `starting` или ECONNREFUSED в логах.**
+Инфраструктурный контейнер ещё не прошёл healthcheck. Подождать 10-15 секунд: `depends_on: condition: service_healthy` поднимет приложение, когда зависимость станет healthy. Проверить: `docker compose ps` и `docker compose logs <service>`.
 
 **2. В логах product-service не видно `cache hit`.**
-Возможные причины: Redis не запущен (`docker compose ps redis` должен быть `healthy`), или продукт удалён между запросами. Проверить: `docker compose logs product-service --tail=30 | grep cache`. Если кеш не отвечает: `docker compose restart redis && docker compose restart product-service`.
+Проверить, что Redis в состоянии `healthy` (`docker compose ps redis`). Если продукт удалён между запросами, на втором GET закономерно будет 404. Сбросить кеш: `docker compose restart redis product-service`.
 
-**3. Swagger UI отдаёт 500 или пустую страницу.**
-Скорее всего сервис ещё не закончил bootstrap (старт ~3-5 сек после healthy). Подождать и обновить. Если /docs работает, а /docs/json возвращает HTML — порядок mount'а нарушен (см. `src/index.ts`: `/docs/json` должен быть зарегистрирован ДО `swaggerUi.serve`).
+**3. Swagger UI возвращает 500 или пустую страницу.**
+Сервис ещё не завершил bootstrap. Подождать 5 секунд. Если `/docs` работает, а `/docs/json` возвращает HTML - нарушен порядок mount'а в `index.ts`: `/docs/json` должен быть зарегистрирован **до** middleware `swaggerUi.serve`.
 
 **4. `stock.low` не появляется в notification-service.**
 Две возможные причины:
 
-а) Остаток не пересёк порог `LOW_STOCK_THRESHOLD=10` СВЕРХУ ВНИЗ — alert не сработает, если изначально остаток уже был ≤10. Нужен переход с `>threshold` к `<=threshold` одной командой stock-out.
+а) Остаток не пересёк `LOW_STOCK_THRESHOLD` сверху вниз. Alert триггерится только в переходе `>threshold` → `≤threshold`. Если изначально остаток уже ≤10, нужно сделать stock-in выше порога, потом stock-out обратно ниже.
 
-б) Publisher stock-service не успел подключиться к RabbitMQ на первом старте (в логах видно `publish skipped (reconnecting)` и `publisher reconnect attempt N`). На холодном `docker compose up -d --build` RabbitMQ становится healthy позже stock-service, и initial `connect()` падает с ECONNREFUSED. Сервис сам перезапускает publisher через `schedulePublisherReconnect` с экспоненциальным backoff (1s → 2s → 4s → 8s → 16s, до 5 попыток) — подождать до 30 секунд и проверить логи: должна появиться строка `publisher reconnected` и `publisher connected to RabbitMQ exchange=warehouse.exchange`. Если все 5 попыток исчерпаны (в логах `publisher giving up reconnect attempts`), тогда восстановление вручную: `docker compose restart stock-service`.
+б) Publisher не успел подключиться к RabbitMQ на холодном старте (в логах `publish skipped (reconnecting)` или `publisher reconnect attempt N`). Сервис сам перезапускает publisher через экспоненциальный backoff `1s → 2s → 4s → 8s → 16s` (5 попыток). Подождать до 30 секунд - должна появиться строка `publisher reconnected` / `publisher connected to RabbitMQ`. Если все попытки исчерпаны (`publisher giving up reconnect attempts`), вручную: `docker compose restart stock-service`.
 
 **5. Grafana показывает «No data».**
-Дашборды смотрят на Prometheus как datasource — убедиться, что в `http://localhost:9090/targets` все три target'а в состоянии UP. Если нет — `docker compose restart prometheus`. Если есть, но в Grafana пусто: метрики появляются только после первого вызова соответствующего endpoint'а (сначала сходить curl'ом, потом смотреть Grafana).
+Проверить `http://localhost:9090/targets` - все four target'а должны быть в состоянии UP. Если нет: `docker compose restart prometheus`. Если есть, но в Grafana пусто - метрики появляются только после первого вызова соответствующего endpoint'а (сходить curl'ом, затем перезагрузить Grafana).
+
+**6. Очередь `stock.low.notifications` накопила сообщения в DLQ.**
+Открыть `http://localhost:15672` (guest / guest) → Queues → `stock.low.dlq`. Содержимое - сообщения, которые не прошли JSON.parse в consumer'е. Очистить вручную через UI или повторно опубликовать после исправления.
