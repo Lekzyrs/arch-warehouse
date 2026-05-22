@@ -1,0 +1,79 @@
+{
+  "title": "notification-service",
+  "uid": "notif-svc",
+  "schemaVersion": 36,
+  "version": 1,
+  "editable": true,
+  "tags": ["archfinal", "notification-service"],
+  "timezone": "browser",
+  "refresh": "10s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Events consumed/sec",
+      "datasource": {
+        "type": "prometheus",
+        "name": "Prometheus"
+      },
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "expr": "rate(stock_events_consumed_total[1m])",
+          "legendFormat": "{{event_type}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Low-stock alerts total",
+      "datasource": {
+        "type": "prometheus",
+        "name": "Prometheus"
+      },
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "expr": "sum(low_stock_alerts_total)",
+          "legendFormat": "alerts",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

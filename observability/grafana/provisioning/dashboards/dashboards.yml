@@ -1,0 +1,13 @@
+# grafana dashboard provider: сканирует /etc/grafana/provisioning/dashboards внутри контейнера,
+# подхватывает все .json и кладёт их в папку archfinal.
+apiVersion: 1
+
+providers:
+  - name: archfinal
+    orgId: 1
+    folder: archfinal
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /etc/grafana/provisioning/dashboards
