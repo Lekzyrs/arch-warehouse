@@ -1,10 +1,12 @@
 import express, { Request, Response } from "express";
+import swaggerUi from "swagger-ui-express";
 import { initSchema } from "./config/db";
 import {
   closePublisher,
   connect as connectPublisher,
 } from "./messaging/publisher";
 import { registry } from "./metrics/registry";
+import { openapiSpec } from "./openapi";
 import { adminRouter } from "./routes/admin.router";
 import { commandsRouter } from "./routes/commands.router";
 import { dashboardRouter } from "./routes/dashboard.router";
@@ -62,6 +64,15 @@ async function bootstrap() {
   // GET /dashboard - server-rendered event store index (aggregate list + recent events)
   app.use("/dashboard", dashboardRouter);
   console.log("[stock-service] Dashboard routes registered at /dashboard");
+
+  // swagger UI и raw openapi json. монтируем ПОСЛЕ всех бизнес-роутов
+  // но до listen - порядок относительно остальных app.use не критичен,
+  // путь /docs не пересекается с /stock|/admin|/dashboard.
+  app.use("/docs", swaggerUi.serve, swaggerUi.setup(openapiSpec));
+  app.get("/docs/json", (_req: Request, res: Response) =>
+    res.json(openapiSpec),
+  );
+  console.log(`[stock-service] Swagger UI: http://localhost:${PORT}/docs`);
 
   app.listen(PORT, () =>
     console.log(`[stock-service] Listening on http://0.0.0.0:${PORT}`),
