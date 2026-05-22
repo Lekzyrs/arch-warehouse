@@ -1,6 +1,8 @@
 import express, { Request, Response } from "express";
+import swaggerUi from "swagger-ui-express";
 import { closeConsumer, startConsumerWithRetry } from "./consumer";
 import { registry } from "./metrics/registry";
+import { openapiSpec } from "./openapi";
 
 const PORT = Number(process.env.SERVER_PORT ?? process.env.PORT ?? 8082);
 
@@ -16,6 +18,14 @@ async function bootstrap() {
     res.set("Content-Type", registry.contentType);
     res.end(await registry.metrics());
   });
+
+  // swagger UI и raw openapi json. HTTP surface минимальный, но рубрика DOC-01
+  // требует /docs на всех HTTP-сервисах
+  app.use("/docs", swaggerUi.serve, swaggerUi.setup(openapiSpec));
+  app.get("/docs/json", (_req: Request, res: Response) =>
+    res.json(openapiSpec),
+  );
+  console.log(`[notification-service] Swagger UI: http://localhost:${PORT}/docs`);
 
   app.listen(PORT, () =>
     console.log(
