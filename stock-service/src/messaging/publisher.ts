@@ -5,6 +5,7 @@ import {
   WAREHOUSE_EXCHANGE,
 } from "../../../shared-contracts/src/messaging";
 import { RABBIT_CONFIG } from "../../../shared-contracts/src/rabbitmq-config";
+import { stockEventsPublishedCounter } from "../metrics/registry";
 
 // module-level singleton. connect() инициализирует, publishStockLow() ругается
 // если канал ещё не открыт. heartbeat:0 НЕ передаём - в amqplib 2.x это означает
@@ -123,6 +124,11 @@ export async function publishStockLow(event: StockLowEvent): Promise<void> {
     Buffer.from(JSON.stringify(event)),
     { deliveryMode: 2, contentType: "application/json" },
   );
+
+  // OBS-03: метрика после publish (не до) - чтобы счётчик отражал реально
+  // отправленные сообщения, а не попытки. при skip-on-no-channel выше return
+  // происходит раньше и .inc не вызывается.
+  stockEventsPublishedCounter.inc({ event_type: ROUTING_KEY_STOCK_LOW });
 
   console.log(
     `[stock-service] published stock.low productId=${event.productId} available=${event.available}`,
