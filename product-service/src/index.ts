@@ -29,6 +29,11 @@ async function bootstrap() {
 
   app.use("/products", productsRouter);
   app.use("/docs", swaggerUi.serve, swaggerUi.setup(openapiSpec));
+  // raw openapi json: machine-readable выдача для examiner/инструментов
+  app.get("/docs/json", (_req: Request, res: Response) =>
+    res.json(openapiSpec),
+  );
+  console.log(`[product-service] Swagger UI: http://localhost:${PORT}/docs`);
 
   app.listen(PORT, () =>
     console.log(`[product-service] Listening on http://0.0.0.0:${PORT}`),
