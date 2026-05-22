@@ -14,9 +14,12 @@
 git clone <repo-url>
 cd archfinal
 docker compose up -d --build
+sleep 45
+# гарантированный rewire publisher stock-service после healthy RabbitMQ
+docker compose restart stock-service
 ```
 
-Подождать ~30-45 секунд (контейнеры стартуют через `depends_on: condition: service_healthy`). После этого все endpoint'ы доступны:
+Подождать ~30-45 секунд (контейнеры стартуют через `depends_on: condition: service_healthy`). `restart stock-service` страхует от случая, когда RabbitMQ становится healthy позже stock-service на холодном `up --build` — после рестарта publisher гарантированно подключён (см. также Troubleshooting #4). После этого все endpoint'ы доступны:
 
 | Что                                  | URL                              |
 | ------------------------------------ | -------------------------------- |
@@ -57,10 +60,13 @@ docker compose up -d --build
 docker compose down -v
 docker compose up -d --build
 sleep 45
+# rewire publisher stock-service после healthy RabbitMQ
+docker compose restart stock-service
+sleep 5
 docker compose ps
 ```
 
-Все десять контейнеров должны быть в состоянии `Up` (и `healthy` там, где есть healthcheck).
+Все десять контейнеров должны быть в состоянии `Up` (и `healthy` там, где есть healthcheck). После рестарта в логах stock-service: `publisher connected to RabbitMQ exchange=warehouse.exchange`.
 
 ### Шаг 1 - R1: ≥3 контейнерных сервиса, единый `docker compose up`
 
@@ -186,9 +192,9 @@ curl -s "http://localhost:8081/stock/movements?productId=$PRODUCT_ID"
 Показать преподавателю разделение по таблицам:
 
 ```bash
-# write side - append-only лог событий
+# write side - append-only лог событий (PK = (aggregate_id, version), нет суррогатного id)
 docker compose exec postgres psql -U archuser -d stock_db \
-  -c "SELECT id, aggregate_id, event_type, version, occurred_at FROM events ORDER BY version DESC LIMIT 5;"
+  -c "SELECT aggregate_id, event_type, version, occurred_at FROM events ORDER BY occurred_at DESC LIMIT 5;"
 
 # read side - денормализованная проекция
 docker compose exec postgres psql -U archuser -d stock_db \
@@ -223,7 +229,7 @@ curl -s -X POST http://localhost:8081/stock/commands/adjustment \
 
 # полный неизменяемый лог событий по агрегату
 docker compose exec postgres psql -U archuser -d stock_db -c \
-  "SELECT version, event_type, occurred_at FROM events WHERE aggregate_id='$AGG' ORDER BY version;"
+  "SELECT aggregate_id, version, event_type, occurred_at FROM events WHERE aggregate_id='$AGG' ORDER BY version;"
 ```
 
 Ожидаемый результат: видно append-only лог с возрастающим `version` (1, 2, 3, ...), типы событий `STOCK_IN`, `STOCK_OUT`, `ADJUSTMENT`. Никаких UPDATE/DELETE в `events` нет — только INSERT.
@@ -337,7 +343,17 @@ archfinal/
 Скорее всего сервис ещё не закончил bootstrap (старт ~3-5 сек после healthy). Подождать и обновить. Если /docs работает, а /docs/json возвращает HTML — порядок mount'а нарушен (см. `src/index.ts`: `/docs/json` должен быть зарегистрирован ДО `swaggerUi.serve`).
 
 **4. `stock.low` не появляется в notification-service.**
-Проверить, что остаток действительно пересёк порог `LOW_STOCK_THRESHOLD=10` СВЕРХУ ВНИЗ (alert не сработает, если изначально остаток уже был ≤10 — нужен переход с `>threshold` к `<=threshold`). Сбросить состояние: `docker compose down -v && docker compose up -d --build`, затем повторить шаг 3 сценария защиты.
+Две возможные причины:
+
+а) Остаток не пересёк порог `LOW_STOCK_THRESHOLD=10` СВЕРХУ ВНИЗ — alert не сработает, если изначально остаток уже был ≤10. Нужен переход с `>threshold` к `<=threshold` одной командой stock-out.
+
+б) Publisher stock-service не успел подключиться к RabbitMQ на первом старте (в логах видно `publish skipped (reconnecting)`). На холодном `docker compose up -d --build` RabbitMQ становится healthy позже stock-service, и initial `connect()` падает с ECONNREFUSED. Восстановление одной командой:
+
+```bash
+docker compose restart stock-service
+```
+
+После рестарта в логах появится `publisher connected to RabbitMQ exchange=warehouse.exchange`, и stock.low будет публиковаться. Повторить шаг 3 сценария защиты на новом aggregateId / warehouseId.
 
 **5. Grafana показывает «No data».**
 Дашборды смотрят на Prometheus как datasource — убедиться, что в `http://localhost:9090/targets` все три target'а в состоянии UP. Если нет — `docker compose restart prometheus`. Если есть, но в Grafana пусто: метрики появляются только после первого вызова соответствующего endpoint'а (сначала сходить curl'ом, потом смотреть Grafana).
