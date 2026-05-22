@@ -5,7 +5,7 @@
 #   step 1: seed stock (POST stock-in 20)
 #   step 2: trigger low-stock (POST stock-out 15, available=5 <= threshold=10),
 #           assert notification-service logs LOW STOCK
-#   step 3: docker compose restart rabbitmq, wait 20s for broker + consumer reconnect
+#   step 3: docker compose restart rabbitmq, wait 35s for broker + consumer reconnect
 #   step 4: seed fresh aggregate, trigger second low-stock,
 #           assert LOW STOCK appears AFTER restart - EDA-05 DURABILITY CONFIRMED
 #   step 5: check Mailpit REST API for "Low Stock Alert" email (non-fatal)
@@ -88,8 +88,8 @@ if ! docker compose restart rabbitmq 2>/dev/null; then
     exit 1
   fi
 fi
-echo "  waiting 20s for RabbitMQ to start + consumer to reconnect..."
-sleep 20
+echo "  waiting 35s for RabbitMQ to start + consumer to reconnect (worst-case backoff sum)..."
+sleep 35
 
 # grep по строкам, специфичным для пост-restart пути: "connection closed
 # unexpectedly" (conn.on('close')) или "consumer reconnect attempt failed"
