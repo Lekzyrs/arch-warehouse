@@ -259,3 +259,100 @@ ${snapshotRowsHtml}
 </body>
 </html>`;
 }
+
+// replay page: before/after сравнение для DASH-06.
+// before  - текущие агрегаты до rebuild, after - после (либо null если страница
+// показывает только "до" состояние и кнопку Trigger Replay).
+// message - результат rebuild ('no projection tables found', 'projection rebuilt', ошибка).
+// форма POST показывается только когда after === null - после rebuild страница
+// отображает оба состояния и форма скрывается, чтобы избежать повторного нажатия.
+export function renderReplayPage(
+  before: AggregateRow[],
+  after: AggregateRow[] | null,
+  message: string | null,
+): string {
+  const beforeRowsHtml = before.map(renderAggregateRow).join("\n");
+  const emptyBeforeNote =
+    before.length === 0
+      ? `<p>No aggregates before replay.</p>`
+      : "";
+
+  // сообщение результата экранируется - даже если оно содержит часть ошибки
+  // с html-символами, они выводятся как текст, не как разметка
+  const messageHtml =
+    message !== null
+      ? `<div class="replay-result"><strong>${htmlEscape(String(message))}</strong></div>`
+      : "";
+
+  // форма POST видна только в "before" режиме (after === null)
+  const formHtml =
+    after === null
+      ? `<form method="POST" action="/dashboard/replay">
+    <button type="submit">Trigger Replay</button>
+  </form>`
+      : "";
+
+  // after таблица рендерится только если rebuild уже отработал
+  let afterSectionHtml = "";
+  if (after !== null) {
+    const afterRowsHtml = after.map(renderAggregateRow).join("\n");
+    const emptyAfterNote =
+      after.length === 0
+        ? `<p>No aggregates after replay.</p>`
+        : "";
+    afterSectionHtml = `
+  <h2>After</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Type</th>
+        <th>Events</th>
+        <th>Last Version</th>
+        <th>Last Event Time</th>
+      </tr>
+    </thead>
+    <tbody>
+${afterRowsHtml}
+    </tbody>
+  </table>
+  ${emptyAfterNote}`;
+  }
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Replay - Event Store Rebuild</title>
+  <style>${CSS_STYLES}
+    .replay-result { margin: 16px 0; padding: 12px; background: #eef; border: 1px solid #99c; }
+    form { margin: 16px 0; }
+    button { padding: 8px 16px; font-family: monospace; font-size: 14px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <p><a href="/dashboard">&larr; Back to Dashboard</a></p>
+  <h1>Replay - Event Store Rebuild</h1>
+  ${messageHtml}
+
+  <h2>Before</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Type</th>
+        <th>Events</th>
+        <th>Last Version</th>
+        <th>Last Event Time</th>
+      </tr>
+    </thead>
+    <tbody>
+${beforeRowsHtml}
+    </tbody>
+  </table>
+  ${emptyBeforeNote}
+  ${formHtml}
+${afterSectionHtml}
+</body>
+</html>`;
+}
