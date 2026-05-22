@@ -1,5 +1,4 @@
 import amqp from "amqplib";
-import { Counter } from "prom-client";
 import { z } from "zod";
 import {
   DLQ_QUEUE,
@@ -10,7 +9,10 @@ import {
 } from "../../shared-contracts/src/messaging";
 import { RABBIT_CONFIG } from "../../shared-contracts/src/rabbitmq-config";
 import { sendLowStockEmail } from "./emailer";
-import { registry } from "./metrics/registry";
+import {
+  lowStockAlertsCounter,
+  stockEventsConsumedCounter,
+} from "./metrics/registry";
 
 // EDA-02 + EDA-04 hardened consumer:
 //   - DLX exchange + DLQ asserted, main queue имеет x-dead-letter-exchange arg
@@ -59,15 +61,6 @@ const StockLowEventSchema = z.object({
   threshold: z.number().int().positive(),
   aggregateId: z.string().min(1),
   occurredAt: z.string(),
-});
-
-// module-level Counter, регистрируется в общем registry чтобы попасть в
-// /actuator/prometheus. labels: 'success' | 'validation_error' | 'email_error'.
-const notifications_consumed_total = new Counter({
-  name: "notifications_consumed_total",
-  help: "Total notification messages consumed",
-  labelNames: ["result"],
-  registers: [registry],
 });
 
 // safe-parse productId без выкидывания исключений - используется только в
@@ -165,7 +158,10 @@ async function startConsumer(): Promise<void> {
           e,
         );
         workingCh.nack(msg, false, false);
-        notifications_consumed_total.inc({ result: "validation_error" });
+        // OBS-03: считаем КАЖДУЮ доставку (включая poisoned payload) - метрика
+        // отражает физическое потребление с очереди. low_stock_alerts_total
+        // ниже инкрементится только на успешном email path, разница = ошибки.
+        stockEventsConsumedCounter.inc({ event_type: ROUTING_KEY_STOCK_LOW });
         return;
       }
 
@@ -178,7 +174,7 @@ async function startConsumer(): Promise<void> {
         // nack(allUpTo=false, requeue=false) - DLX подхватит. requeue:true
         // создал бы бесконечный цикл (T-05-08).
         workingCh.nack(msg, false, false);
-        notifications_consumed_total.inc({ result: "validation_error" });
+        stockEventsConsumedCounter.inc({ event_type: ROUTING_KEY_STOCK_LOW });
         return;
       }
 
@@ -198,14 +194,17 @@ async function startConsumer(): Promise<void> {
       try {
         await sendLowStockEmail(event);
         workingCh.ack(msg);
-        notifications_consumed_total.inc({ result: "success" });
+        stockEventsConsumedCounter.inc({ event_type: ROUTING_KEY_STOCK_LOW });
+        // low_stock_alerts_total инкрементится ТОЛЬКО на успешном email.
+        // email_error path ниже не вызывает .inc - алёрт не доехал до пользователя.
+        lowStockAlertsCounter.inc();
       } catch (e) {
         console.error(
           "[notification-service] email send failed (non-fatal):",
           e,
         );
         workingCh.ack(msg);
-        notifications_consumed_total.inc({ result: "email_error" });
+        stockEventsConsumedCounter.inc({ event_type: ROUTING_KEY_STOCK_LOW });
       }
     },
     { noAck: false },
