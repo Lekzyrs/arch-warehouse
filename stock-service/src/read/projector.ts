@@ -1,6 +1,7 @@
 import { pool } from "../config/db";
 import type { StockEvent } from "../domain/eventSchemas";
 import { publishStockLow } from "../messaging/publisher";
+import { projectionLagGauge } from "../metrics/registry";
 import { resetReadModels } from "./readModels";
 
 // валидация LOW_STOCK_THRESHOLD - читаем один раз на module load, не на каждое событие.
@@ -168,6 +169,15 @@ export async function applyEventToReadModel(
     "UPDATE projection_offset SET last_event_at = $1, last_aggregate = $2, last_version = $3 WHERE id = 1",
     [event.occurred_at, event.aggregate_id, event.version],
   );
+
+  // OBS-03: projection lag = текущее время минус event.occurred_at. Gauge,
+  // не Counter - значение может уменьшаться когда проектор догоняет. set после
+  // успешной проекции (если бы упало раньше, на /metrics висело бы старое значение).
+  const eventTsMs = new Date(event.occurred_at).getTime();
+  if (Number.isFinite(eventTsMs)) {
+    const lagSeconds = Math.max(0, (Date.now() - eventTsMs) / 1000);
+    projectionLagGauge.set(lagSeconds);
+  }
 
   console.log(
     `[stock-service] projected event_type=${event.event_type} product=${p.productId} wh=${p.warehouseId}`,
