@@ -58,7 +58,7 @@
 Требования: Docker (Engine 24+), Docker Compose v2.
 
 ```bash
-git clone <repo-url>
+git clone github.com/Lekzyrs/arch-warehouse
 cd archfinal
 cp .env.example .env       # при желании отредактировать пароли / порты
 docker compose up -d --build
