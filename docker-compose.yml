@@ -58,6 +58,7 @@ services:
     image: prom/prometheus:v3.5.0
     volumes:
       - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./observability/alert_rules.yml:/etc/prometheus/alert_rules.yml
     ports:
       - "9090:9090"
 
@@ -122,8 +123,11 @@ services:
       RABBITMQ_PORT: 5672
       RABBITMQ_USER: ${RABBITMQ_USER}
       RABBITMQ_PASS: ${RABBITMQ_PASS}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672
       SERVER_PORT: ${STOCK_SERVICE_PORT}
       SNAPSHOT_EVERY: ${SNAPSHOT_EVERY:-50}
+      ADMIN_KEY: ${ADMIN_KEY:-changeme}
+      LOW_STOCK_THRESHOLD: ${LOW_STOCK_THRESHOLD:-10}
     depends_on:
       postgres:
         condition: service_healthy
@@ -142,7 +146,13 @@ services:
       RABBITMQ_PORT: 5672
       RABBITMQ_USER: ${RABBITMQ_USER}
       RABBITMQ_PASS: ${RABBITMQ_PASS}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672
       SERVER_PORT: ${NOTIFICATION_SERVICE_PORT}
+      NOTIFICATION_PORT: ${NOTIFICATION_SERVICE_PORT}
+      LOW_STOCK_THRESHOLD: ${LOW_STOCK_THRESHOLD:-10}
+      MAILPIT_SMTP_HOST: mailpit
+      MAILPIT_SMTP_PORT: 1025
+      NOTIFICATION_EMAIL_TO: ${NOTIFICATION_EMAIL_TO:-admin@archfinal.local}
     depends_on:
       rabbitmq:
         condition: service_healthy

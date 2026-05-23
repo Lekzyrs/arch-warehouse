@@ -28,7 +28,13 @@ async function bootstrap() {
   });
 
   app.use("/products", productsRouter);
+  // raw openapi json: регистрируется ДО swaggerUi.serve, иначе swagger-ui
+  // middleware на /docs/* перехватит /docs/json и вернёт HTML
+  app.get("/docs/json", (_req: Request, res: Response) =>
+    res.json(openapiSpec),
+  );
   app.use("/docs", swaggerUi.serve, swaggerUi.setup(openapiSpec));
+  console.log(`[product-service] Swagger UI: http://localhost:${PORT}/docs`);
 
   app.listen(PORT, () =>
     console.log(`[product-service] Listening on http://0.0.0.0:${PORT}`),

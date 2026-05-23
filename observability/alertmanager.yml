@@ -1,8 +1,21 @@
-# Phase 1 stub - minimal valid Alertmanager config so the container starts
-# cleanly (Assumption A3 / RESEARCH Open Question 3).
-# Phase 5/6: replace with Mailpit routing rules.
+# alertmanager: маршрутизация алертов в mailpit (dev SMTP sink).
+# smtp_require_tls обязательно false - mailpit не предъявляет TLS-сертификат на 1025.
+# auth не нужен: mailpit принимает любую почту без креденшелов.
+# конкретные alert rules появятся в 06-04 (low_stock_alert).
+global:
+  smtp_smarthost: mailpit:1025
+  smtp_from: archfinal-alerts@localhost
+  smtp_require_tls: false
+
 route:
-  receiver: "null"
+  receiver: mailpit
+  group_by: [alertname]
+  group_wait: 10s
+  group_interval: 30s
+  repeat_interval: 1h
 
 receivers:
-  - name: "null"
+  - name: mailpit
+    email_configs:
+      - to: archfinal-dev@localhost
+        send_resolved: true

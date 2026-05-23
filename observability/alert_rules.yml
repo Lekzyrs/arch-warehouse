@@ -1,0 +1,42 @@
+# prometheus alert rules для archfinal.
+# имя группы archfinal.rules появится в http://localhost:9090/rules.
+# primary rule fires когда notification-service инкрементил low_stock_alerts_total
+# (т.е. email с low-stock alert успешно ушёл в mailpit).
+# метрика приходит из shared-contracts/src/metrics.ts (LOW_STOCK_ALERTS_TOTAL).
+groups:
+  - name: archfinal.rules
+    rules:
+      # primary: fires когда хотя бы один low-stock alert был доставлен за последние 2m.
+      # for: 1m - условие должно держаться минуту, чтобы исключить транзиентные spike'и.
+      # переход inactive -> pending -> firing занимает ~1m + 1 scrape (15s) = ~1m15s.
+      - alert: LowStock
+        expr: increase(low_stock_alerts_total[2m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low stock level detected in warehouse"
+          description: "notification-service processed a low-stock alert - stock for a product has fallen below threshold. Check stock-service for affected product_id."
+
+      # ===== fallback alerts (закомментированы, для демо на защите если основной путь не готов) =====
+      #
+      # fallback OPTION B: fires когда notification-service consumed любое stock-событие.
+      # uncomment если low-stock condition ещё не вызвана, но есть consumed events.
+      #   - alert: StockEventConsumed
+      #     expr: increase(stock_events_consumed_total[2m]) > 0
+      #     for: 1m
+      #     labels:
+      #       severity: info
+      #     annotations:
+      #       summary: "Stock event consumed by notification-service"
+      #
+      # fallback OPTION C: fires сразу после любой stock-команды.
+      # use ТОЛЬКО для демо alert-pipeline без Phase 5 ready. в реальной системе
+      # for: 0m на постоянно ненулевой counter породит email storm.
+      #   - alert: StockCommandProcessed
+      #     expr: stock_commands_total > 0
+      #     for: 0m
+      #     labels:
+      #       severity: info
+      #     annotations:
+      #       summary: "Stock command processed (demo fallback alert)"

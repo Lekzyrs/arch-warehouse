@@ -38,16 +38,58 @@ export const AdjustmentPayloadSchema = z.object({
   performedBy: z.string().optional(),
 });
 
-// trio-branch discriminated union. ES-07: payload типизирован контрактом
+// WH-02 reservation lifecycle. reservationId - caller-provided correlation key
+// RESERVE: available -= quantity (on_hand unchanged, reserved+=)
+export const ReservePayloadSchema = z.object({
+  event_type: z.literal("RESERVE"),
+  productId: z.string().min(1),
+  warehouseId: z.string().min(1),
+  locationId: z.string().optional(),
+  quantity: z.number().int().positive(),
+  reservationId: z.string().min(1),
+  performedBy: z.string().optional(),
+});
+
+// RELEASE: revert reserve. reserved -= quantity
+export const ReleasePayloadSchema = z.object({
+  event_type: z.literal("RELEASE"),
+  productId: z.string().min(1),
+  warehouseId: z.string().min(1),
+  locationId: z.string().optional(),
+  quantity: z.number().int().positive(),
+  reservationId: z.string().min(1),
+  performedBy: z.string().optional(),
+});
+
+// COMMIT_RESERVATION: товар уходит со склада. on_hand -= quantity И reserved -= quantity
+export const CommitReservationPayloadSchema = z.object({
+  event_type: z.literal("COMMIT_RESERVATION"),
+  productId: z.string().min(1),
+  warehouseId: z.string().min(1),
+  locationId: z.string().optional(),
+  quantity: z.number().int().positive(),
+  reservationId: z.string().min(1),
+  performedBy: z.string().optional(),
+});
+
+// six-branch discriminated union. ES-07: payload типизирован контрактом
 export const EventPayloadSchema = z.discriminatedUnion("event_type", [
   StockInPayloadSchema,
   StockOutPayloadSchema,
   AdjustmentPayloadSchema,
+  ReservePayloadSchema,
+  ReleasePayloadSchema,
+  CommitReservationPayloadSchema,
 ]);
 
 export type StockInPayload = z.infer<typeof StockInPayloadSchema>;
 export type StockOutPayload = z.infer<typeof StockOutPayloadSchema>;
 export type AdjustmentPayload = z.infer<typeof AdjustmentPayloadSchema>;
+export type ReservePayload = z.infer<typeof ReservePayloadSchema>;
+export type ReleasePayload = z.infer<typeof ReleasePayloadSchema>;
+export type CommitReservationPayload = z.infer<
+  typeof CommitReservationPayloadSchema
+>;
 export type EventPayload = z.infer<typeof EventPayloadSchema>;
 
 // row из events table. payload типизирован дискриминированным юнионом

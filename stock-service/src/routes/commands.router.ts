@@ -4,12 +4,14 @@ import {
   type Request,
   type Response,
 } from "express";
-import { Counter } from "prom-client";
 import { z } from "zod";
 import { ConflictError, DomainError } from "../domain/errors";
 import {
   AdjustmentPayloadSchema,
+  CommitReservationPayloadSchema,
   ReasonCode,
+  ReleasePayloadSchema,
+  ReservePayloadSchema,
   StockInPayloadSchema,
   StockOutPayloadSchema,
 } from "../domain/eventSchemas";
@@ -18,7 +20,8 @@ import {
   decide,
   loadAggregate,
 } from "../domain/stockAggregate";
-import { registry } from "../metrics/registry";
+import { stockCommandsCounter } from "../metrics/registry";
+import { applyEventToReadModel } from "../read/projector";
 
 // command DTO. aggregateId = одна aggregate-stream на пару product+warehouse
 const StockInCommandSchema = z.object({
@@ -50,13 +53,40 @@ const AdjustmentCommandSchema = z.object({
   performedBy: z.string().optional(),
 });
 
-// module-level Counter. duplicate-registration ошибка если создавать в обработчике
-const commandsTotal = new Counter({
-  name: "stock_commands_total",
-  help: "Total stock commands processed",
-  labelNames: ["command_type", "result"],
-  registers: [registry],
+// WH-02 reserve. reservationId - correlation key для последующего release/commit
+const ReserveCommandSchema = z.object({
+  aggregateId: z.string().min(1),
+  productId: z.string().min(1),
+  warehouseId: z.string().min(1),
+  locationId: z.string().optional(),
+  quantity: z.number().int().positive(),
+  reservationId: z.string().min(1),
+  performedBy: z.string().optional(),
 });
+
+const ReleaseCommandSchema = z.object({
+  aggregateId: z.string().min(1),
+  productId: z.string().min(1),
+  warehouseId: z.string().min(1),
+  locationId: z.string().optional(),
+  quantity: z.number().int().positive(),
+  reservationId: z.string().min(1),
+  performedBy: z.string().optional(),
+});
+
+const CommitReservationCommandSchema = z.object({
+  aggregateId: z.string().min(1),
+  productId: z.string().min(1),
+  warehouseId: z.string().min(1),
+  locationId: z.string().optional(),
+  quantity: z.number().int().positive(),
+  reservationId: z.string().min(1),
+  performedBy: z.string().optional(),
+});
+
+// stock_commands_total Counter определён в metrics/registry.ts как module-level
+// singleton (stockCommandsCounter). здесь только инкрементируем - имя метрики
+// и набор labels пришли из shared-contracts METRIC_NAMES.
 
 export const commandsRouter = Router();
 
@@ -84,7 +114,7 @@ commandsRouter.post(
       decide(state, { type: "STOCK_IN", ...cmd });
     } catch (err) {
       if (err instanceof DomainError) {
-        commandsTotal.inc({ command_type: "STOCK_IN", result: "rejected" });
+        stockCommandsCounter.inc({ command_type: "STOCK_IN", result: "rejected" });
         return res.status(422).json({ error: err.message });
       }
       throw err;
@@ -105,7 +135,16 @@ commandsRouter.post(
         [{ event_type: "STOCK_IN", payload }],
         nextVersion,
       );
-      commandsTotal.inc({ command_type: "STOCK_IN", result: "success" });
+      // sync projection (CQRS-03 read-your-writes). projection fail = stale read model, rethrow для 500
+      try {
+        for (const evt of appended) {
+          await applyEventToReadModel(evt);
+        }
+      } catch (e) {
+        console.error("[stock-service] projection failed for event:", e);
+        throw e;
+      }
+      stockCommandsCounter.inc({ command_type: "STOCK_IN", result: "success" });
       console.log(
         `[stock-service] STOCK_IN aggregate=${cmd.aggregateId} v=${appended[0].version}`,
       );
@@ -117,7 +156,7 @@ commandsRouter.post(
       });
     } catch (err) {
       if (err instanceof ConflictError) {
-        commandsTotal.inc({ command_type: "STOCK_IN", result: "conflict" });
+        stockCommandsCounter.inc({ command_type: "STOCK_IN", result: "conflict" });
         return res.status(409).json({ error: err.message });
       }
       throw err;
@@ -140,7 +179,7 @@ commandsRouter.post(
       decide(state, { type: "STOCK_OUT", quantity: cmd.quantity });
     } catch (err) {
       if (err instanceof DomainError) {
-        commandsTotal.inc({ command_type: "STOCK_OUT", result: "rejected" });
+        stockCommandsCounter.inc({ command_type: "STOCK_OUT", result: "rejected" });
         return res.status(422).json({ error: err.message });
       }
       throw err;
@@ -161,7 +200,15 @@ commandsRouter.post(
         [{ event_type: "STOCK_OUT", payload }],
         nextVersion,
       );
-      commandsTotal.inc({ command_type: "STOCK_OUT", result: "success" });
+      try {
+        for (const evt of appended) {
+          await applyEventToReadModel(evt);
+        }
+      } catch (e) {
+        console.error("[stock-service] projection failed for event:", e);
+        throw e;
+      }
+      stockCommandsCounter.inc({ command_type: "STOCK_OUT", result: "success" });
       console.log(
         `[stock-service] STOCK_OUT aggregate=${cmd.aggregateId} v=${appended[0].version}`,
       );
@@ -173,7 +220,7 @@ commandsRouter.post(
       });
     } catch (err) {
       if (err instanceof ConflictError) {
-        commandsTotal.inc({ command_type: "STOCK_OUT", result: "conflict" });
+        stockCommandsCounter.inc({ command_type: "STOCK_OUT", result: "conflict" });
         return res.status(409).json({ error: err.message });
       }
       throw err;
@@ -200,7 +247,7 @@ commandsRouter.post(
       });
     } catch (err) {
       if (err instanceof DomainError) {
-        commandsTotal.inc({ command_type: "ADJUSTMENT", result: "rejected" });
+        stockCommandsCounter.inc({ command_type: "ADJUSTMENT", result: "rejected" });
         return res.status(422).json({ error: err.message });
       }
       throw err;
@@ -222,7 +269,15 @@ commandsRouter.post(
         [{ event_type: "ADJUSTMENT", payload }],
         nextVersion,
       );
-      commandsTotal.inc({ command_type: "ADJUSTMENT", result: "success" });
+      try {
+        for (const evt of appended) {
+          await applyEventToReadModel(evt);
+        }
+      } catch (e) {
+        console.error("[stock-service] projection failed for event:", e);
+        throw e;
+      }
+      stockCommandsCounter.inc({ command_type: "ADJUSTMENT", result: "success" });
       console.log(
         `[stock-service] ADJUSTMENT aggregate=${cmd.aggregateId} reason=${cmd.reason_code} v=${appended[0].version}`,
       );
@@ -234,7 +289,226 @@ commandsRouter.post(
       });
     } catch (err) {
       if (err instanceof ConflictError) {
-        commandsTotal.inc({ command_type: "ADJUSTMENT", result: "conflict" });
+        stockCommandsCounter.inc({ command_type: "ADJUSTMENT", result: "conflict" });
+        return res.status(409).json({ error: err.message });
+      }
+      throw err;
+    }
+  }),
+);
+
+// WH-02: POST /reserve - резервирует quantity. available -= quantity, on_hand без изменений
+commandsRouter.post(
+  "/reserve",
+  wrap(async (req, res) => {
+    const parsed = ReserveCommandSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ errors: parsed.error.issues });
+    }
+    const cmd = parsed.data;
+
+    const { state, nextVersion } = await loadAggregate(cmd.aggregateId);
+
+    try {
+      decide(state, {
+        type: "RESERVE",
+        quantity: cmd.quantity,
+        reservationId: cmd.reservationId,
+      });
+    } catch (err) {
+      if (err instanceof DomainError) {
+        stockCommandsCounter.inc({ command_type: "RESERVE", result: "rejected" });
+        return res.status(422).json({ error: err.message });
+      }
+      throw err;
+    }
+
+    const payload = ReservePayloadSchema.parse({
+      event_type: "RESERVE",
+      productId: cmd.productId,
+      warehouseId: cmd.warehouseId,
+      locationId: cmd.locationId,
+      quantity: cmd.quantity,
+      reservationId: cmd.reservationId,
+      performedBy: cmd.performedBy,
+    });
+
+    try {
+      const appended = await appendEvents(
+        cmd.aggregateId,
+        [{ event_type: "RESERVE", payload }],
+        nextVersion,
+      );
+      try {
+        for (const evt of appended) {
+          await applyEventToReadModel(evt);
+        }
+      } catch (e) {
+        console.error("[stock-service] projection failed for event:", e);
+        throw e;
+      }
+      stockCommandsCounter.inc({ command_type: "RESERVE", result: "success" });
+      console.log(
+        `[stock-service] RESERVE aggregate=${cmd.aggregateId} res=${cmd.reservationId} v=${appended[0].version}`,
+      );
+      return res.status(200).json({
+        aggregateId: cmd.aggregateId,
+        version: appended[0].version,
+        event_type: "RESERVE",
+        payload,
+      });
+    } catch (err) {
+      if (err instanceof ConflictError) {
+        stockCommandsCounter.inc({ command_type: "RESERVE", result: "conflict" });
+        return res.status(409).json({ error: err.message });
+      }
+      throw err;
+    }
+  }),
+);
+
+// POST /release - отменяет резервацию. reserved -= quantity
+commandsRouter.post(
+  "/release",
+  wrap(async (req, res) => {
+    const parsed = ReleaseCommandSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ errors: parsed.error.issues });
+    }
+    const cmd = parsed.data;
+
+    const { state, nextVersion } = await loadAggregate(cmd.aggregateId);
+
+    try {
+      decide(state, {
+        type: "RELEASE",
+        quantity: cmd.quantity,
+        reservationId: cmd.reservationId,
+      });
+    } catch (err) {
+      if (err instanceof DomainError) {
+        stockCommandsCounter.inc({ command_type: "RELEASE", result: "rejected" });
+        return res.status(422).json({ error: err.message });
+      }
+      throw err;
+    }
+
+    const payload = ReleasePayloadSchema.parse({
+      event_type: "RELEASE",
+      productId: cmd.productId,
+      warehouseId: cmd.warehouseId,
+      locationId: cmd.locationId,
+      quantity: cmd.quantity,
+      reservationId: cmd.reservationId,
+      performedBy: cmd.performedBy,
+    });
+
+    try {
+      const appended = await appendEvents(
+        cmd.aggregateId,
+        [{ event_type: "RELEASE", payload }],
+        nextVersion,
+      );
+      try {
+        for (const evt of appended) {
+          await applyEventToReadModel(evt);
+        }
+      } catch (e) {
+        console.error("[stock-service] projection failed for event:", e);
+        throw e;
+      }
+      stockCommandsCounter.inc({ command_type: "RELEASE", result: "success" });
+      console.log(
+        `[stock-service] RELEASE aggregate=${cmd.aggregateId} res=${cmd.reservationId} v=${appended[0].version}`,
+      );
+      return res.status(200).json({
+        aggregateId: cmd.aggregateId,
+        version: appended[0].version,
+        event_type: "RELEASE",
+        payload,
+      });
+    } catch (err) {
+      if (err instanceof ConflictError) {
+        stockCommandsCounter.inc({ command_type: "RELEASE", result: "conflict" });
+        return res.status(409).json({ error: err.message });
+      }
+      throw err;
+    }
+  }),
+);
+
+// POST /commit-reservation - товар уходит. on_hand -= quantity И reserved -= quantity
+commandsRouter.post(
+  "/commit-reservation",
+  wrap(async (req, res) => {
+    const parsed = CommitReservationCommandSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ errors: parsed.error.issues });
+    }
+    const cmd = parsed.data;
+
+    const { state, nextVersion } = await loadAggregate(cmd.aggregateId);
+
+    try {
+      decide(state, {
+        type: "COMMIT_RESERVATION",
+        quantity: cmd.quantity,
+        reservationId: cmd.reservationId,
+      });
+    } catch (err) {
+      if (err instanceof DomainError) {
+        stockCommandsCounter.inc({
+          command_type: "COMMIT_RESERVATION",
+          result: "rejected",
+        });
+        return res.status(422).json({ error: err.message });
+      }
+      throw err;
+    }
+
+    const payload = CommitReservationPayloadSchema.parse({
+      event_type: "COMMIT_RESERVATION",
+      productId: cmd.productId,
+      warehouseId: cmd.warehouseId,
+      locationId: cmd.locationId,
+      quantity: cmd.quantity,
+      reservationId: cmd.reservationId,
+      performedBy: cmd.performedBy,
+    });
+
+    try {
+      const appended = await appendEvents(
+        cmd.aggregateId,
+        [{ event_type: "COMMIT_RESERVATION", payload }],
+        nextVersion,
+      );
+      try {
+        for (const evt of appended) {
+          await applyEventToReadModel(evt);
+        }
+      } catch (e) {
+        console.error("[stock-service] projection failed for event:", e);
+        throw e;
+      }
+      stockCommandsCounter.inc({
+        command_type: "COMMIT_RESERVATION",
+        result: "success",
+      });
+      console.log(
+        `[stock-service] COMMIT_RESERVATION aggregate=${cmd.aggregateId} res=${cmd.reservationId} v=${appended[0].version}`,
+      );
+      return res.status(200).json({
+        aggregateId: cmd.aggregateId,
+        version: appended[0].version,
+        event_type: "COMMIT_RESERVATION",
+        payload,
+      });
+    } catch (err) {
+      if (err instanceof ConflictError) {
+        stockCommandsCounter.inc({
+          command_type: "COMMIT_RESERVATION",
+          result: "conflict",
+        });
         return res.status(409).json({ error: err.message });
       }
       throw err;

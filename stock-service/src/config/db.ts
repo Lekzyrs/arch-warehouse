@@ -1,4 +1,5 @@
 import { Pool } from "pg";
+import { initReadModelSchema } from "../read/readModels";
 
 // все поля из process.env с безопасным fallback, без config-объекта и dotenv
 export const pool = new Pool({
@@ -32,4 +33,7 @@ export async function initSchema(): Promise<void> {
     )
   `);
   console.log("[stock-service] schema ready (events + snapshots)");
+
+  // read-side DDL: stock_balances, stock_movement, projection_offset (CQRS-01)
+  await initReadModelSchema();
 }

@@ -1,0 +1,11 @@
+# grafana datasource provisioning: prometheus поверх compose-DNS.
+# editable: false блокирует случайные правки через UI - они всё равно теряются на рестарте.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false

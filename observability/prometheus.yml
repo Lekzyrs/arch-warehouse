@@ -1,27 +1,35 @@
-# Phase 1 stub - minimal valid Prometheus config so the container starts
-# without a parse error (Assumption A2). Phase 6 fills in real scrape rules.
-# Targets use Docker-network DNS (container name + the port the service
-# actually listens on inside the network). Each service binds SERVER_PORT =
-# ${<SVC>_SERVICE_PORT} from .env, so the internal port == the .env default:
-# product 8080, stock 8081, notification 8082 (CR-01: stock listens on 8081,
-# not 8080 - there is no container/host port split).
+# prometheus scrape config для archfinal стека.
+# все таргеты используют compose-DNS имена сервисов (P13).
+# три app-сервиса экспонируют метрики на /actuator/prometheus,
+# rabbitmq - на /metrics (плагин rabbitmq_prometheus, порт 15692).
+# alert_rules.yml монтируется в /etc/prometheus/alert_rules.yml из docker-compose.
+# alertmanager - compose-DNS имя, порт 9093 (default).
 global:
   scrape_interval: 15s
+  scrape_timeout: 10s
   evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alert_rules.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
 
 scrape_configs:
   - job_name: "product-service"
-    metrics_path: "/actuator/prometheus"
+    metrics_path: /actuator/prometheus
     static_configs:
       - targets: ["product-service:8080"]
 
   - job_name: "stock-service"
-    metrics_path: "/actuator/prometheus"
+    metrics_path: /actuator/prometheus
     static_configs:
       - targets: ["stock-service:8081"]
 
   - job_name: "notification-service"
-    metrics_path: "/actuator/prometheus"
+    metrics_path: /actuator/prometheus
     static_configs:
       - targets: ["notification-service:8082"]
 
